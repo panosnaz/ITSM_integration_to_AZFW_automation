@@ -1,0 +1,943 @@
+# ITSM Integration - Quick Start Guide
+
+**Version:** 1.0  
+**Last Updated:** November 10, 2025  
+**Audience:** ITSM Administrators  
+**Purpose:** Compact guide to integrate your ITSM with Azure Firewall Policy Automation
+
+---
+
+## 📋 Overview
+
+This guide provides the essential information needed to integrate your ITSM platform with Azure Firewall Policy Automation. The integration enables automatic validation of firewall rule requests against Azure policies.
+
+### What You'll Configure
+
+✅ **Outbound trigger** - Send rule validation requests to Parser  
+✅ **Inbound endpoint** - Receive validation results from Parser  
+✅ **Display logic** - Show formatted reports in tickets
+
+---
+
+## 📑 Table of Contents
+
+1. [Prerequisites](#-prerequisites)
+2. [Integration Architecture](#-integration-architecture)
+   - [Architecture Overview](#architecture-overview)
+   - [Request/Response Flow](#requestresponse-flow)
+   - [Callback Retry Flow](#callback-retry-flow)
+   - [Performance Expectations](#-performance-expectations)
+   - [Configuration Requirements](#-configuration-requirements)
+   - [Security Configuration](#-security-configuration)
+3. [Step 1: Configure Outbound Trigger](#-step-1-configure-outbound-trigger-itsm--parser)
+4. [Step 2: Configure Inbound Endpoint](#-step-2-configure-inbound-endpoint-parser--itsm)
+5. [Step 3: Configure Display Logic](#-step-3-configure-display-logic)
+6. [Optional: Traffic Investigation](#-optional-traffic-investigation)
+7. [Testing Checklist](#-testing-checklist)
+8. [Troubleshooting](#-troubleshooting)
+9. [Getting Help](#-getting-help)
+10. [Quick Reference](#-quick-reference)
+
+---
+
+## ✅ Prerequisites
+
+Before starting integration, ensure you have:
+
+### Access & Permissions
+- [ ] Admin access to ITSM platform
+- [ ] Ability to create REST endpoints in ITSM
+- [ ] Ability to create automation rules/workflows
+- [ ] Network firewall approval for Parser ↔ ITSM communication
+
+### Information Gathering
+- [ ] Parser URL: `http://________:8080`
+- [ ] ITSM callback endpoint URL: `https://________/api/callback`
+- [ ] API keys (if authentication enabled)
+- [ ] Test ticket ID for validation
+
+### Technical Requirements
+- [ ] ITSM supports outbound HTTPS POST requests
+- [ ] ITSM supports inbound REST API endpoints
+- [ ] JSON payload support (both directions)
+- [ ] Timeout configurable to 60+ seconds
+
+### Parser Access Verification
+```bash
+# Test parser connectivity
+curl http://parser-host:8080/health
+
+# Expected response:
+# {"status": "healthy", "azure_auth": "valid"}
+```
+
+
+---
+
+## 🏗️ Integration Architecture
+
+This section covers everything ITSM administrators need to know to integrate with the Parser, including architecture diagrams, configuration requirements, performance expectations, and security setup.
+
+### Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           YOUR ITSM PLATFORM (🔵 Blue)                       │
+│                                                                              │
+│  ┌──────────────┐      ┌─────────────────┐      ┌────────────────────┐    │
+│  │   Ticket     │◄─────│  REST Endpoint  │      │  Automation        │    │
+│  │  (Change/    │      │  (Callback)     │◄─────│  Trigger           │    │
+│  │   Incident)  │      │  Receives       │      │  (Rule/Webhook)    │    │
+│  └──────┬───────┘      │  Results        │      └──────┬─────────────┘    │
+│         │              └─────────▲────────┘             │                   │
+│         │ User Views           │ ⏱️ 0-155s              │ ⏱️ ~1ms           │
+│         │ Report         Updates Ticket           Sends Request            │
+└─────────┼──────────────────────┼────────────────────────┼───────────────────┘
+          │                      │                        │
+          │                      │                        ▼
+          │                      │               ┌──────────────────┐
+          │                      │               │  Azure FW Parser │
+          │                      │               │  (Flask Service) │
+          │                      │               │  🟢 Port 8080    │
+          │                      └───────────────┤                  │
+          │                 ⏱️ < 200ms (retry)   │  ⏱️ < 100ms      │
+          │                          HTTP POST   │  HTTP 202 Accept │
+          │                          (Callback)  └────────┬─────────┘
+          │                                               │
+          │                                               │ ⏱️ 5-60s Validates
+          │                                               ▼
+          │                                      ┌──────────────────┐
+          │                                      │  3-Layer Cache   │
+          │                                      │  • RCG (Disk)    │
+          │                                      │  • Index (Disk)  │
+          │                                      │  • Memory Cache  │
+          │                                      └────────┬─────────┘
+          │                                               │
+          │                          ⏱️ 5s (cache hit)    │ ⏱️ 175s (cache miss)
+          │                          ⏱️ 175s (Azure API)  ▼
+          │                                      ┌──────────────────┐
+          │                                      │   Azure Cloud    │
+          │                                      │  🟠 Firewall     │
+          └──────────────────────────────────────│  🟠 Policies     │
+                                                 │  🟠 Log Analytics│
+                                                 └──────────────────┘
+
+Legend:
+🔵 ITSM Platform  🟢 Parser Service  🟠 Azure Cloud
+⏱️ Performance annotations (timing estimates)
+```
+
+### Request/Response Flow
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                    INTEGRATION DATA FLOW                         │
+└──────────────────────────────────────────────────────────────────┘
+
+1. User creates ticket with firewall rules
+        │
+        ▼
+2. Automation triggers (status change/button)
+        │
+        ▼
+3. ITSM → Parser
+   POST http://parser:8080/webhook
+   {
+     "ticketId": "CHG0012345",
+     "callbackUrl": "https://itsm/api/callback",
+     "rules": [...]
+   }
+        │
+        ▼
+4. Parser responds immediately
+   HTTP 202 Accepted
+   {"job_id": "20251108_143000_CHG0012345"}
+        │
+        ▼
+5. Parser validates (async, 5-60 seconds)
+   • Checks for duplicates
+   • Detects conflicts
+   • Generates deployment config
+        │
+        ▼
+6. Parser → ITSM (with retry - see diagram below)
+   POST https://itsm/api/callback
+   {
+     "ticket_id": "CHG0012345",
+     "status": "success",
+     "summary": "Validated 5 rules: 3 new, 2 merged",
+     "report_text": "📊 Full formatted report...",
+     "details": {...}
+   }
+        │
+        ▼
+7. ITSM updates ticket with report
+        │
+        ▼
+8. User reviews results
+```
+
+---
+
+### Callback Retry Flow
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                  CALLBACK RETRY FLOW (Step 6 Detail)             │
+└──────────────────────────────────────────────────────────────────┘
+
+Parser → ITSM: POST /callback
+        │
+        ├─→ ✅ HTTP 2xx (200-299)?
+        │       └─→ SUCCESS - Ticket updated
+        │
+        ├─→ ⚠️ HTTP 4xx (400-499)?
+        │       └─→ PERMANENT FAILURE - Don't retry
+        │           (Client error: bad request, auth failed)
+        │
+        └─→ ❌ HTTP 5xx / Timeout / Network Error?
+                │
+                ├─→ 🔄 Retry 1 after 5s   (Total: 5s elapsed)
+                │       └─→ ✅ Success? Done
+                │       └─→ ❌ Failed? Continue...
+                │
+                ├─→ 🔄 Retry 2 after 10s  (Total: 15s elapsed)
+                │       └─→ ✅ Success? Done
+                │       └─→ ❌ Failed? Continue...
+                │
+                ├─→ 🔄 Retry 3 after 20s  (Total: 35s elapsed)
+                │       └─→ ✅ Success? Done
+                │       └─→ ❌ Failed? Continue...
+                │
+                ├─→ 🔄 Retry 4 after 40s  (Total: 75s elapsed)
+                │       └─→ ✅ Success? Done
+                │       └─→ ❌ Failed? Continue...
+                │
+                └─→ 🔄 Retry 5 after 80s  (Total: 155s elapsed)
+                        └─→ ✅ Success? Done
+                        └─→ ❌ All retries exhausted:
+                                • Save callback_failed.txt
+                                • Log failure in parser.log
+                                • Results available for manual recovery
+```
+
+---
+
+### ⏱️ Performance Expectations
+
+Understanding typical response times helps set appropriate timeouts and user expectations.
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                  PERFORMANCE TIMELINE                            │
+└──────────────────────────────────────────────────────────────────┘
+
+Request Submitted (t=0)
+    │
+    ├─→ 0-100ms: HTTP 202 Accepted (immediate)
+    │             Parser acknowledges request, returns job_id
+    │
+    ├─→ 5-60s: Validation Processing
+    │     │
+    │     ├─ First Request (Cold Cache):
+    │     │   • 5s: Azure API calls (fetch policies, IP Groups)
+    │     │   • 175s: Rule indexing (3,927 rules)
+    │     │   • 2s: Matching logic
+    │     │   • 6s: Report generation
+    │     │   └─ Total: ~220s (3.7 minutes)
+    │     │
+    │     └─ Subsequent Requests (Warm Cache):
+    │         • 0.5s: Cache hit (RCG + Rule Index)
+    │         • 2s: Matching logic
+    │         • 0.5s: Report generation
+    │         └─ Total: ~3s
+    │
+    └─→ 0-155s: Callback Delivery (with retries)
+          ├─ Success on first attempt: < 1s
+          ├─ Success after 2 retries: ~15s
+          └─ All 5 retries exhausted: 155s
+
+═══════════════════════════════════════════════════════════════════
+
+Total End-to-End Time:
+
+• Best Case (Warm Cache):      3-5 seconds
+• Typical (Warm Cache):         5-10 seconds  
+• First Request (Cold Cache):   220-230 seconds (~4 minutes)
+• With Network Issues:          Up to 380 seconds (~6 minutes)
+
+═══════════════════════════════════════════════════════════════════
+
+Timeout Recommendations:
+
+✅ ITSM HTTP Client Timeout:    60-90 seconds
+✅ User Patience Expectation:   2-5 minutes (first request)
+✅ Subsequent Requests:         10-30 seconds
+```
+
+### Cache Behavior
+
+| Cache State | First Request | Subsequent Requests | Notes |
+|-------------|--------------|---------------------|-------|
+| **Cold Start** | 220s | 220s | Parser just started, no cache |
+| **Warm Cache** | 3s | 3s | Normal operation (cache TTL: 24h) |
+| **Expired Cache** | 180s | 3s | Cache refresh in background |
+| **Azure Policy Changed** | 220s | 3s | Requires cache invalidation |
+
+**💡 Tip:** For better performance, call `POST /health` endpoint periodically to keep cache warm.
+
+---
+
+### ⚙️ Configuration Requirements
+
+### Network Access
+
+| Direction | From | To | Port | Purpose |
+|-----------|------|-----|------|---------|
+| Outbound | ITSM | Parser | 8080/443 | Send validation requests |
+| Inbound | Parser | ITSM | 443 | Receive callbacks |
+
+**Firewall Rules:**
+```
+Allow: ITSM → Parser:8080 (or :443 if behind reverse proxy)
+Allow: Parser → ITSM:443
+```
+
+### Parser Details
+
+You need to know:
+- **Parser URL:** `http://parser-host:8080` (or `https://` if using TLS)
+- **API Key:** (optional) For authentication
+- **Health Check:** `GET http://parser-host:8080/health` should return `{"status": "healthy"}`
+
+---
+
+### 🔒 Security Configuration
+
+#### API Key Authentication (Recommended)
+
+**1. Get API Key from Parser Administrator**
+
+**2. Add to Outbound Requests:**
+```http
+X-API-Key: your-generated-api-key-here
+```
+
+**3. Configure Parser Callback Authentication:**
+
+If your ITSM callback endpoint requires authentication, provide these details to Parser admin:
+- **Auth Type:** API Key / OAuth 2.0 / Basic Auth
+- **Header Name:** (e.g., `X-API-Key`, `Authorization`)
+- **Credentials:** API key or token
+
+Parser will include authentication in callbacks to your ITSM.
+
+#### TLS/HTTPS (Production)
+
+For production deployments:
+- ✅ Use HTTPS for Parser (deploy behind reverse proxy with valid certificate)
+- ✅ Use HTTPS for ITSM callback endpoints
+- ✅ Validate TLS certificates (don't disable verification)
+
+---
+
+## 📤 Step 1: Configure Outbound Trigger (ITSM → Parser)
+
+### What to Configure
+
+Create automation that triggers when:
+- Ticket status changes to "Assessment" / "Planning" / "Pending Approval"
+- User clicks "Validate Rules" button
+- Ticket is updated with firewall rules
+
+### Expected Request Structure
+
+**Endpoint:** `POST http://parser-host:8080/webhook`
+
+**Headers:**
+```http
+Content-Type: application/json
+X-API-Key: your-api-key-here  (if authentication enabled)
+```
+
+**Request Body:**
+```json
+{
+  "ticketId": "CHG0012345",
+  "callbackUrl": "https://itsm.company.com/api/callback/validate/CHG0012345",
+  "rules": [
+    {
+      "name": "Allow-Web-Traffic",
+      "ruleType": "NetworkRule",
+      "ipProtocols": ["TCP"],
+      "sourceAddresses": ["10.0.0.0/24"],
+      "destinationAddresses": ["192.168.1.0/24"],
+      "destinationPorts": ["443", "80"]
+    }
+  ]
+}
+```
+
+### Request Parameters
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `ticketId` | string | ✅ Yes | Your ITSM ticket identifier |
+| `callbackUrl` | string | ✅ Yes | URL where Parser sends results |
+| `rules` | array | ✅ Yes | Array of firewall rule objects |
+
+**💡 How Rule Collection Groups (RCGs) are determined:**
+- The Parser **automatically discovers** all RCGs from your Azure Firewall Policy
+- It **matches incoming rules** against existing rules in all RCGs
+- The system **determines the best RCG** for each rule based on:
+  - Compatibility scoring (matching sources, destinations, protocols)
+  - Security boundaries (only merges within same RCG)
+  - Rule type alignment (Network vs Application rules)
+- **No user input needed** - the system handles RCG assignment intelligently
+
+### Rule Object Structure
+
+**NetworkRule:**
+```json
+{
+  "name": "Rule-Name",
+  "ruleType": "NetworkRule",
+  "ipProtocols": ["TCP"],                    // TCP, UDP, ICMP, Any
+  "sourceAddresses": ["10.0.0.0/24"],        // IP/CIDR or ["*"]
+  "destinationAddresses": ["192.168.1.0/24"], // IP/CIDR or Service Tags
+  "destinationPorts": ["443", "80"]          // Port numbers or ranges
+}
+```
+
+**ApplicationRule:**
+```json
+{
+  "name": "Rule-Name",
+  "ruleType": "ApplicationRule",
+  "protocols": [
+    {"protocolType": "Https", "port": 443},
+    {"protocolType": "Http", "port": 80}
+  ],
+  "sourceAddresses": ["10.0.0.0/24"],
+  "targetFqdns": ["*.microsoft.com", "example.com"]
+}
+```
+
+### Expected Response (Immediate)
+
+```json
+HTTP 202 Accepted
+
+{
+  "status": "accepted",
+  "job_id": "20251108-143000_CHG0012345_a3f9",
+  "message": "Validation job started"
+}
+```
+
+**Note:** This is an async response. The actual validation results will be sent to your `callbackUrl` in 5-60 seconds.
+
+---
+
+## 📥 Step 2: Configure Inbound Endpoint (Parser → ITSM)
+
+### What to Configure
+
+Create a REST API endpoint that:
+- Accepts POST requests from Parser
+- Parses JSON payload
+- Updates the ticket with results
+
+### Expected Callback Structure
+
+**From Parser to your endpoint:**
+
+```
+POST https://itsm.company.com/api/callback/validate/CHG0012345
+Content-Type: application/json
+```
+
+**Callback Payload:**
+```json
+{
+  "ticket_id": "CHG0012345",
+  "job_id": "20251108-143000_CHG0012345_a3f9",
+  "status": "success",
+  
+  "summary": "Validated 5 rules: 3 new, 2 merged, 0 conflicts",
+  
+  "report_text": "═══════════════════════════════════════════════════════════════════════════════\n📊 AZURE FIREWALL VALIDATION REPORT\n═══════════════════════════════════════════════════════════════════════════════\n\n✅ Quick Summary: 3 out of 5 rules are new and ready to deploy\n\n✅ RULE 1: Allow-Web-Traffic\n   Status: New (no conflicts)\n   Type: NetworkRule\n   Protocol: TCP\n   Source: 10.0.0.0/24\n   Destination: 192.168.1.0/24\n   Ports: 443, 80\n\n⚠️  RULE 2: Allow-Database-Access\n   Status: Already Exists\n   Matched existing rule: \"Prod-DB-Access\"\n   Recommendation: Review existing rule or modify name\n\n✅ RULE 3: Allow-SSH-Admin\n   Status: New (no conflicts)\n   Type: NetworkRule\n   Protocol: TCP\n   Source: 10.1.0.0/24\n   Destination: 10.2.0.0/24\n   Ports: 22\n\n───────────────────────────────────────────────────────────────────────────────\n📁 Deployment File Generated:\n   output/jobs/20251108-143000_CHG0012345_a3f9/azfw_new_rule_config_CHG0012345.json\n\n📊 Statistics:\n   • Total Rules: 5\n   • New Rules: 3\n   • Already Exist: 2\n   • Conflicts: 0\n   • Processing Time: 2.3 seconds\n\n✅ Next Steps:\n   1. Review validation results above\n   2. Optionally click \"Investigate Traffic\" to analyze usage patterns\n   3. Approve ticket to proceed with deployment\n═══════════════════════════════════════════════════════════════════════════════",
+  
+  "message": "Validated 5 rules: 3 new, 2 merged, 0 conflicts\n\n═══════════════════════════════════════════════════════════════════════════════\n📊 AZURE FIREWALL VALIDATION REPORT\n...",
+  
+  "details": {
+    "total_rules": 5,
+    "validated": 5,
+    "merged": 2,
+    "conflicts": 0,
+    "new_rules": 3,
+    "elapsed_time": 2.34,
+    "deployment_file": "output/jobs/20251108-143000_CHG0012345_a3f9/azfw_new_rule_config_CHG0012345.json"
+  }
+}
+```
+
+### Callback Fields Explanation
+
+| Field | Type | Description | How to Use |
+|-------|------|-------------|------------|
+| `ticket_id` | string | Your ticket identifier | Use to lookup ticket |
+| `job_id` | string | Parser job identifier | Optional: store for tracking |
+| `status` | string | `success` or `failed` | Update ticket state |
+| **`summary`** | string | **One-line status** | Display in ticket header/status |
+| **`report_text`** | string | **Full formatted report** | Display in work notes/comments |
+| `message` | string | Combined summary + report | Legacy field (use report_text instead) |
+| `details` | object | Structured metrics | Optional: map to custom fields |
+
+### HTTP Status Code Reference
+
+Understanding how Parser interprets your endpoint's responses:
+
+| Status Code Range | Meaning | Parser Behavior | Use Case |
+|------------------|---------|-----------------|----------|
+| **200-299** | ✅ Success | Stop retrying immediately | Callback processed successfully |
+| **400** | ⚠️ Bad Request | Stop retrying (permanent error) | Invalid JSON payload from Parser |
+| **401** | ⚠️ Unauthorized | Stop retrying (permanent error) | API key missing or invalid |
+| **403** | ⚠️ Forbidden | Stop retrying (permanent error) | Authentication valid but insufficient permissions |
+| **404** | ⚠️ Not Found | Stop retrying (permanent error) | Callback URL endpoint doesn't exist |
+| **405** | ⚠️ Method Not Allowed | Stop retrying (permanent error) | Endpoint doesn't accept POST |
+| **408** | ⚠️ Request Timeout | Retry with backoff | ITSM processing took too long |
+| **429** | ⚠️ Too Many Requests | Retry with backoff | Rate limit exceeded (rare) |
+| **500-599** | ❌ Server Error | Retry with backoff | ITSM internal error, temporary issue |
+| **Connection Timeout** | ❌ Network Issue | Retry with backoff | ITSM unreachable or network problem |
+| **Connection Refused** | ❌ Network Issue | Retry with backoff | ITSM endpoint down or firewall blocking |
+| **DNS Failure** | ❌ Network Issue | Retry with backoff | Invalid hostname or DNS issue |
+
+**Key Principles:**
+- ✅ **2xx = Success** - Parser considers the callback delivered
+- ⚠️ **4xx = Permanent Failure** - Parser stops retrying (client-side problem)
+- ❌ **5xx = Temporary Failure** - Parser retries with exponential backoff (server-side problem)
+- ❌ **Network Errors = Temporary** - Parser retries (connectivity issue)
+
+**Your Endpoint Should Return:**
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{
+  "success": true,
+  "message": "Ticket CHG0012345 updated successfully"
+}
+```
+
+**⚠️ Important:** Return `200 OK` quickly (< 5 seconds). If ticket update takes longer, process it asynchronously and return success immediately.
+
+### What Your Endpoint Should Do
+
+1. **Receive POST request** with JSON payload
+2. **Parse JSON** and extract `ticket_id` and `report_text`
+3. **Lookup ticket** using `ticket_id`
+4. **Update ticket:**
+   - Add `report_text` to work notes/comments
+   - Optionally update status based on `status` field
+   - Optionally set summary field with `summary` value
+5. **Return success response:**
+   ```json
+   HTTP 200 OK
+   {"success": true, "message": "Ticket updated"}
+   ```
+
+### Webhook Retry Logic
+
+**Parser Retry Behavior:**
+
+If the callback to your ITSM endpoint fails, the Parser automatically retries with exponential backoff:
+
+| Attempt | Delay | Total Time Elapsed |
+|---------|-------|-------------------|
+| 1st retry | 5 seconds | 5s |
+| 2nd retry | 10 seconds | 15s |
+| 3rd retry | 20 seconds | 35s |
+| 4th retry | 40 seconds | 75s |
+| 5th retry (final) | 80 seconds | 155s |
+
+**Retry Conditions:**
+
+Parser retries when:
+- ❌ Connection timeout (endpoint unreachable)
+- ❌ HTTP 5xx errors (500, 502, 503, 504)
+- ❌ Network errors (DNS failures, connection refused)
+
+Parser does NOT retry when:
+- ✅ HTTP 2xx (200-299) - Success
+- ⚠️ HTTP 4xx (400-499) - Client error (permanent failure)
+
+**After All Retries Fail:**
+
+If all 5 retry attempts fail:
+1. Parser logs the failure to `output/parser.log`
+2. Job status saved to `output/jobs/<job_id>/callback_failed.txt`
+3. Validation results remain in job folder for manual retrieval
+4. **No email notification sent** (future enhancement)
+
+**Recommendations:**
+
+✅ **Design endpoint for idempotency** - Multiple retries with same payload should be safe  
+✅ **Return HTTP 200 quickly** - Update ticket asynchronously if processing takes time  
+✅ **Monitor callback endpoint availability** - Parser retries help but aren't infinite  
+✅ **Implement logging** - Track received callbacks for troubleshooting  
+
+**Checking Failed Callbacks:**
+
+```bash
+# Find jobs with failed callbacks
+find output/jobs -name "callback_failed.txt"
+
+# View specific failure details
+cat output/jobs/20251108-143000_CHG0012345_a3f9/callback_failed.txt
+
+# Expected output:
+# Callback failed after 5 attempts
+# Last error: Connection timeout to https://itsm/api/callback
+# Last attempt: 2025-11-08 14:32:35
+# Validation results available in: validation_report_CHG0012345.json
+```
+---
+
+## 📊 Step 3: Configure Display Logic
+
+### Simple Approach (Recommended)
+
+Display `report_text` verbatim in work notes/comments. The report is pre-formatted with:
+- ✅ Section headers with borders
+- ✅ Unicode icons (✅, ⚠️, 📊, 📁)
+- ✅ Clear rule-by-rule breakdown
+- ✅ Statistics and next steps
+
+**No parsing required** - just display the text as-is.
+
+### Rich Display (Optional)
+
+If your ITSM supports multiple display fields:
+
+1. **Summary Field:** Display `summary` value
+   - Example: "Validated 5 rules: 3 new, 2 merged, 0 conflicts"
+
+2. **Work Notes:** Display `report_text` value (full report)
+
+3. **Custom Fields:** Map `details` object to fields:
+   - Total Rules → `details.total_rules`
+   - New Rules → `details.new_rules`
+   - Conflicts → `details.conflicts`
+   - Processing Time → `details.elapsed_time`
+
+---
+
+## 🔍 Optional: Traffic Investigation
+
+### When to Use
+
+After validation, users can trigger traffic investigation to analyze actual firewall log data from Azure Log Analytics.
+
+### How to Trigger
+
+**Endpoint:** `POST http://parser-host:8080/investigate/{ticket_id}`
+
+**Headers:**
+```http
+Content-Type: application/json
+X-API-Key: your-api-key-here  (if authentication enabled)
+```
+
+**Request Body:**
+```json
+{
+  "callback_url": "https://itsm.company.com/api/callback/investigate/CHG0012345",
+  "days": 30
+}
+```
+
+**Parameters:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `callback_url` | string | ✅ Yes | URL for investigation results |
+| `days` | integer | No | Lookback period (default: 30) |
+
+### Investigation Response (Immediate)
+
+```json
+HTTP 202 Accepted
+
+{
+  "status": "accepted",
+  "investigation_id": "inv_20251108_143045"
+}
+```
+
+### Investigation Callback (Async)
+
+**Sent to your `callback_url` after 10-120 seconds:**
+
+```json
+{
+  "ticket_id": "CHG0012345",
+  "job_id": "inv_20251108_143045",
+  "status": "success",
+  
+  "summary": "Traffic investigation completed: 3/5 rules with traffic (1,247 total hits)",
+  
+  "report_text": "═══════════════════════════════════════════════════════════════════════════════\n🔍 TRAFFIC INVESTIGATION REPORT\n═══════════════════════════════════════════════════════════════════════════════\n\n✅ Investigation Summary: 3 out of 5 rules have active traffic\n\n✅ RULE 1: Allow-Web-Traffic\n   Status: Traffic Found ✓\n   Total Hits: 1,247\n   Data Transferred: 523.4 MB\n   Time Period: Last 30 days\n   \n   Top Traffic Patterns:\n   ┌─────────────────┬──────────────────┬──────┬──────────┐\n   │ Source IP       │ Destination IP   │ Port │ Hit Count│\n   ├─────────────────┼──────────────────┼──────┼──────────┤\n   │ 10.0.0.15       │ 192.168.1.5      │ 443  │ 847      │\n   │ 10.0.0.23       │ 192.168.1.5      │ 443  │ 312      │\n   │ 10.0.0.8        │ 192.168.1.10     │ 80   │ 88       │\n   └─────────────────┴──────────────────┴──────┴──────────┘\n   \n   ✅ Recommendation: Rule is actively used. Approve request.\n\n❌ RULE 2: Allow-Database-Access\n   Status: No Traffic Found\n   Time Period: Last 30 days\n   \n   ⚠️  Recommendation: No traffic detected. Verify requirement before approval.\n\n✅ RULE 3: Allow-SSH-Admin\n   Status: Traffic Found ✓\n   Total Hits: 42\n   Data Transferred: 8.7 MB\n   \n   📊 Usage Pattern: Sporadic (administrative access)\n   ✅ Recommendation: Low-volume administrative traffic. Approve if expected.\n\n───────────────────────────────────────────────────────────────────────────────\n📊 Overall Statistics:\n   • Rules Investigated: 5\n   • Rules with Traffic: 3\n   • Rules without Traffic: 2\n   • Total Traffic Hits: 1,289\n   • Total Data Transfer: 532.1 MB\n   • Investigation Time: 15.7 seconds\n\n💡 Next Steps:\n   1. Review traffic patterns above\n   2. Validate requirements for rules without traffic\n   3. Proceed with approval if justified\n═══════════════════════════════════════════════════════════════════════════════",
+  
+  "details": {
+    "rules_investigated": 5,
+    "rules_with_traffic": 3,
+    "rules_without_traffic": 2,
+    "total_hits": 1289,
+    "total_data_mb": 532.1,
+    "elapsed_time": 15.67
+  }
+}
+```
+
+---
+
+## ✅ Testing Checklist
+
+### Pre-Integration Tests
+
+- [ ] **Connectivity:** Can ITSM reach Parser?
+  ```bash
+  curl http://parser-host:8080/health
+  # Expected: {"status": "healthy"}
+  ```
+
+- [ ] **Parser → ITSM:** Can Parser reach your callback endpoint?
+  ```bash
+  curl -X POST https://itsm/api/callback/test \
+    -H "Content-Type: application/json" \
+    -d '{"test": true}'
+  # Expected: HTTP 200 OK
+  ```
+
+### Integration Test
+
+**1. Create Test Ticket**
+
+```
+Ticket ID: TEST-AZFW-001
+
+Rules (paste in ticket):
+{
+  "rules": [
+    {
+      "name": "Test-Allow-HTTPS",
+      "ruleType": "NetworkRule",
+      "ipProtocols": ["TCP"],
+      "sourceAddresses": ["10.0.0.0/24"],
+      "destinationAddresses": ["192.168.1.0/24"],
+      "destinationPorts": ["443"]
+    }
+  ]
+}
+```
+
+**2. Trigger Validation**
+- Move ticket to trigger status OR click validation button
+
+**3. Expected Results (within 60 seconds)**
+- ✅ Ticket updated with validation report in work notes
+- ✅ Report shows rule status (new/existing/conflict)
+- ✅ Report includes statistics and next steps
+
+**4. Test Investigation (Optional)**
+- Click "Investigate Traffic" button
+- Wait 30-60 seconds
+- Check for traffic report in work notes
+
+### Error Handling Test
+
+**Test invalid rule:**
+```json
+{
+  "rules": [
+    {
+      "name": "Invalid",
+      "ruleType": "NetworkRule",
+      "ipProtocols": ["INVALID_PROTOCOL"],
+      "sourceAddresses": [],
+      "destinationAddresses": [],
+      "destinationPorts": []
+    }
+  ]
+}
+```
+
+**Expected:** Callback with `"status": "failed"` and error details
+
+---
+
+## 🔧 Troubleshooting
+
+### Issue: Callbacks Not Received
+
+**Symptoms:** Validation completes but ticket not updated
+
+**Check:**
+```bash
+# 1. Verify callback URL is reachable
+curl -X POST https://itsm/api/callback/test \
+  -H "Content-Type: application/json" \
+  -d '{"test": true}'
+
+# 2. Check Parser logs for callback attempts
+tail -f /path/to/parser/output/parser.log | grep callback
+
+# 3. Verify firewall allows Parser → ITSM traffic
+```
+
+**Solutions:**
+- ✅ Verify callback URL in ITSM automation configuration
+- ✅ Check firewall rules allow Parser IP → ITSM:443
+- ✅ Ensure ITSM endpoint accepts POST with JSON body
+- ✅ Check API key authentication if enabled
+
+### Issue: Rules Not Parsing
+
+**Symptoms:** "No rules found" or "Invalid format" error
+
+**Solutions:**
+- ✅ Use JSON format (not plain text)
+- ✅ Validate JSON syntax with online validator
+- ✅ Ensure all required fields are present
+- ✅ Check arrays use `["value"]` not `"value"`
+
+**Valid JSON Example:**
+```json
+{
+  "rules": [
+    {
+      "name": "Rule-Name",
+      "ruleType": "NetworkRule",
+      "ipProtocols": ["TCP"],
+      "sourceAddresses": ["10.0.0.0/24"],
+      "destinationAddresses": ["192.168.1.0/24"],
+      "destinationPorts": ["443"]
+    }
+  ]
+}
+```
+
+### Issue: Timeout Errors
+
+**Symptoms:** Request timeout or no response
+
+**Solutions:**
+- ✅ Increase timeout in ITSM HTTP client (recommended: 30-60 seconds)
+- ✅ Verify Parser is running: `curl http://parser:8080/health`
+- ✅ Check Parser resource usage (CPU, memory)
+- ✅ Verify Azure API connectivity from Parser
+
+### Issue: Investigation Returns No Traffic
+
+**Symptoms:** "No traffic found" despite known traffic
+
+**Solutions:**
+- ✅ Verify Log Analytics workspace is configured in Parser
+- ✅ Check Azure Firewall diagnostic settings are enabled
+- ✅ Wait 5-10 minutes for logs to populate
+- ✅ Increase investigation period from 30 to 60 days
+- ✅ Verify IP addresses match actual traffic
+
+---
+
+## 📞 Getting Help
+
+### Health Check
+
+```bash
+# Parser health
+curl http://parser-host:8080/health
+
+# Expected response:
+{
+  "status": "healthy",
+  "azure_auth": "valid",
+  "cache_status": "ready",
+  "uptime_seconds": 3600
+}
+```
+
+### Log Locations
+
+| Component | Log Location | Purpose |
+|-----------|--------------|---------|
+| Parser | `output/parser.log` | Validation jobs, callbacks |
+| Job Output | `output/jobs/<job_id>/` | Per-job details |
+
+### Before Reporting Issues
+
+✅ Check troubleshooting section above  
+✅ Review Parser logs: `tail -f output/parser.log`  
+✅ Verify health endpoint returns "healthy"  
+✅ Test connectivity between ITSM and Parser  
+
+---
+
+## 📄 Quick Reference
+
+### Parser Endpoints
+
+| Method | Endpoint | Purpose | Response |
+|--------|----------|---------|----------|
+| POST | `/webhook` | Trigger validation | 202 Accepted |
+| POST | `/investigate/{ticket_id}` | Trigger investigation | 202 Accepted |
+| GET | `/health` | Check status | 200 OK |
+
+### Required Configuration
+
+| Item | Value | Notes |
+|------|-------|-------|
+| Parser URL | `http://parser-host:8080` | Or `https://` if behind proxy |
+| Callback URL Pattern | `https://itsm/api/callback/{type}/{ticket_id}` | Must be accessible from Parser |
+| Authentication | API Key (optional) | Add `X-API-Key` header |
+| Timeout | 30-60 seconds | For HTTP client |
+
+### Callback URL Examples
+
+```
+Validation:    https://itsm.company.com/api/callback/validate/CHG0012345
+Investigation: https://itsm.company.com/api/callback/investigate/CHG0012345
+```
+
+### Sample Request (Copy/Paste Ready)
+
+```bash
+curl -X POST http://parser-host:8080/webhook \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-api-key" \
+  -d '{
+    "ticketId": "TEST-001",
+    "callbackUrl": "https://itsm.company.com/api/callback/validate/TEST-001",
+    "rules": [
+      {
+        "name": "Allow-HTTPS",
+        "ruleType": "NetworkRule",
+        "ipProtocols": ["TCP"],
+        "sourceAddresses": ["10.0.0.0/24"],
+        "destinationAddresses": ["192.168.1.0/24"],
+        "destinationPorts": ["443"]
+      }
+    ]
+  }'
+```
+
+---
+
+**Version:** 1.0  
+**Last Updated:** November 10, 2025  
+**Related Docs:**
+- Full Integration Guide: `ITSM_INTEGRATION_GUIDE_v3.md`
+- API Reference: `API_REFERENCE.md`
+- Troubleshooting: `TROUBLESHOOTING.md`
+- Rule Validation & RCG Assignment: `features/RULE_VALIDATION.md`
