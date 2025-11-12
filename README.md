@@ -133,6 +133,12 @@ Note: This diagram shows the validation flow (Steps 1-8). After validation, the 
 involves Azure DevOps Pipeline → Parser → ITSM callback, which happens hours or days later after human approval.
 ```
 
+### Connectivity & Workflow
+
+<p align="center">
+<img src="Connectivity & Workflow.png">
+</p>
+
 ### Request/Response Flow
 
 ```
