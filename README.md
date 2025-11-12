@@ -54,7 +54,7 @@ Before starting integration, ensure you have:
 - [ ] Network firewall approval for Parser ↔ ITSM communication
 
 ### Information Gathering
-- [ ] Parser URL: `http://________:443`
+- [ ] Parser URL: `https://________` (e.g., `https://azfw-parser.contoso.com`)
 - [ ] ITSM callback endpoint URL: `https://________/api/callback`
 - [ ] API keys (if authentication enabled)
 - [ ] Test ticket ID for validation
@@ -67,10 +67,10 @@ Before starting integration, ensure you have:
 
 ### Parser Access Verification
 ```bash
-# Test parser connectivity
-curl http://parser-host:8080/health
+# Test parser connectivity (via Application Gateway)
+curl https://parser-host/health
 
- # Expected response:
+# Expected response:
 # {"status": "healthy", "azure_auth": "valid"}
 ```
 
@@ -133,12 +133,6 @@ Note: This diagram shows the validation flow (Steps 1-8). After validation, the 
 involves Azure DevOps Pipeline → Parser → ITSM callback, which happens hours or days later after human approval.
 ```
 
-### Connectivity & Workflow
-
-<p align="center">
-<img src="Connectivity & Workflow_(agnostic).png">
-</p>
-
 ### Request/Response Flow
 
 ```
@@ -153,7 +147,7 @@ involves Azure DevOps Pipeline → Parser → ITSM callback, which happens hours
         │
         ▼
 3. ITSM → Parser (url hosted on AppGW)
-   POST http://parser:443/webhook
+   POST https://parser:443/webhook
    {
      "ticketId": "CHG0012345",
      "callbackUrl": "https://itsm/api/callback",
@@ -200,7 +194,7 @@ involves Azure DevOps Pipeline → Parser → ITSM callback, which happens hours
         │
         ▼
 12. Pipeline → Parser (url hosted on AppGW)
-   POST http://parser:443/deployment-callback
+   POST https://parser:443/deployment-callback
    {
      "ticketId": "CHG0012345",
      "status": "success",
@@ -343,21 +337,23 @@ Timeout Recommendations:
 
 | Direction | From | To | Port | Purpose |
 |-----------|------|-----|------|---------|
-| Outbound | ITSM | Parser | 8080/443 | Send validation requests |
-| Inbound | Parser | ITSM | 443 | Receive callbacks |
+| Outbound | ITSM | App Gateway | 443 | Send validation requests (HTTPS) |
+| Inbound | App Gateway | ITSM | 443 | Receive callbacks (HTTPS) |
 
 **Firewall Rules:**
 ```
-Allow: ITSM → Parser:8080 (or :443 if behind reverse proxy)
-Allow: Parser → ITSM:443
+Allow: ITSM → Application Gateway:443 (HTTPS)
+Allow: Application Gateway → ITSM:443 (HTTPS)
 ```
+
+**Note:** Parser runs behind Azure Application Gateway for production security (WAF, TLS termination).
 
 ### Parser Details
 
 You need to know:
-- **Parser URL:** `http://parser-host:8080` (or `https://` if using TLS)
+- **Parser URL:** `https://parser-host` (e.g., `https://azfw-parser.contoso.com`)
 - **API Key:** (optional) For authentication
-- **Health Check:** `GET http://parser-host:8080/health` should return `{"status": "healthy"}`
+- **Health Check:** `GET https://parser-host/health` should return `{"status": "healthy"}`
 
 ---
 
@@ -384,7 +380,8 @@ Parser will include authentication in callbacks to your ITSM.
 #### TLS/HTTPS (Production)
 
 For production deployments:
-- ✅ Use HTTPS for Parser (deploy behind reverse proxy with valid certificate)
+- ✅ Parser is deployed behind Azure Application Gateway with TLS termination
+- ✅ All external communication uses HTTPS (port 443)
 - ✅ Use HTTPS for ITSM callback endpoints
 - ✅ Validate TLS certificates (don't disable verification)
 
@@ -401,7 +398,7 @@ Create automation that triggers when:
 
 ### Expected Request Structure
 
-**Endpoint:** `POST http://parser-host:8080/webhook`
+**Endpoint:** `POST https://parser-host/webhook`
 
 **Headers:**
 ```http
@@ -760,7 +757,7 @@ After validation, users can trigger traffic investigation to analyze actual fire
 
 ### How to Trigger
 
-**Endpoint:** `POST http://parser-host:8080/investigate/{ticket_id}`
+**Endpoint:** `POST https://parser-host/investigate/{ticket_id}`
 
 **Headers:**
 ```http
@@ -825,13 +822,13 @@ HTTP 202 Accepted
 
 ### Pre-Integration Tests
 
-- [ ] **Connectivity:** Can ITSM reach Parser?
+- [ ] **Connectivity:** Can ITSM reach Parser (via App Gateway)?
   ```bash
-  curl http://parser-host:8080/health
+  curl https://parser-host/health
   # Expected: {"status": "healthy"}
   ```
 
-- [ ] **Parser → ITSM:** Can Parser reach your callback endpoint?
+- [ ] **App Gateway → ITSM:** Can App Gateway reach your callback endpoint?
   ```bash
   curl -X POST https://itsm/api/callback/test \
     -H "Content-Type: application/json" \
@@ -923,7 +920,7 @@ tail -f /path/to/parser/output/parser.log | grep callback
 
 **Solutions:**
 - ✅ Verify callback URL in ITSM automation configuration
-- ✅ Check firewall rules allow Parser IP → ITSM:443
+- ✅ Check firewall rules allow App Gateway → ITSM:443
 - ✅ Ensure ITSM endpoint accepts POST with JSON body
 - ✅ Check API key authentication if enabled
 
@@ -959,8 +956,8 @@ tail -f /path/to/parser/output/parser.log | grep callback
 
 **Solutions:**
 - ✅ Increase timeout in ITSM HTTP client (recommended: 30-60 seconds)
-- ✅ Verify Parser is running: `curl http://parser:8080/health`
-- ✅ Check Parser resource usage (CPU, memory)
+- ✅ Verify Parser is accessible: `curl https://parser-host/health`
+- ✅ Check App Gateway and backend health status
 - ✅ Verify Azure API connectivity from Parser
 
 ### Issue: Investigation Returns No Traffic
@@ -981,8 +978,8 @@ tail -f /path/to/parser/output/parser.log | grep callback
 **Solutions:**
 - ✅ Verify commit message contains `[AZFW-AUTOMATION] Ticket: {ticketId}` marker
 - ✅ Check Azure DevOps pipeline has callback task configured
-- ✅ Verify `AZFW_AUTOMATION_URL` variable is set in pipeline
-- ✅ Check firewall allows Azure DevOps agents → Parser → ITSM traffic
+- ✅ Verify `AZFW_AUTOMATION_URL` variable is set in pipeline (should point to App Gateway)
+- ✅ Check firewall allows Azure DevOps agents → App Gateway → ITSM traffic
 - ✅ Verify callback URL was stored during initial validation
 - ✅ Review Parser logs for retry attempts and errors
 
@@ -995,8 +992,8 @@ tail -f /path/to/parser/output/parser.log | grep callback
 ### Health Check
 
 ```bash
-# Parser health
-curl http://parser-host:8080/health
+# Parser health (via Application Gateway)
+curl https://parser-host/health
 
 # Expected response:
 {
@@ -1040,8 +1037,8 @@ curl http://parser-host:8080/health
 
 | Item | Value | Notes |
 |------|-------|-------|
-| Parser URL | `http://parser-host:8080` | Or `https://` if behind proxy |
-| Callback URL Pattern | `https://itsm/api/callback/{type}/{ticket_id}` | Must be accessible from Parser |
+| Parser URL | `https://parser-host` | Via Azure Application Gateway (port 443) |
+| Callback URL Pattern | `https://itsm/api/callback/{type}/{ticket_id}` | Must be accessible from App Gateway |
 | Authentication | API Key (optional) | Add `X-API-Key` header |
 | Timeout | 30-60 seconds | For HTTP client |
 
@@ -1061,7 +1058,7 @@ Deployment:    https://itsm.company.com/api/callback/deployment/CHG0012345
 ### Sample Request (Copy/Paste Ready)
 
 ```bash
-curl -X POST http://parser-host:8080/webhook \
+curl -X POST https://parser-host/webhook \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your-api-key" \
   -d '{
