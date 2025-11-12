@@ -25,6 +25,7 @@ This guide provides the essential information needed to integrate your ITSM plat
 1. [Prerequisites](#-prerequisites)
 2. [Integration Architecture](#-integration-architecture)
    - [Architecture Overview](#architecture-overview)
+   - [Connectivity & Workflow](#connectivity--workflow)
    - [Request/Response Flow](#requestresponse-flow)
    - [Callback Retry Flow](#callback-retry-flow)
    - [Performance Expectations](#-performance-expectations)
