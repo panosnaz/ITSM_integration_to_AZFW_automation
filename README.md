@@ -1,7 +1,7 @@
 # ITSM Integration - Quick Start Guide
 
-**Version:** 1.0  
-**Last Updated:** November 10, 2025  
+**Version:** 1.1  
+**Last Updated:** November 12, 2025  
 **Audience:** ITSM Administrators  
 **Purpose:** Compact guide to integrate your ITSM with Azure Firewall Policy Automation
 
@@ -15,6 +15,7 @@ This guide provides the essential information needed to integrate your ITSM plat
 
 ✅ **Outbound trigger** - Send rule validation requests to Parser  
 ✅ **Inbound endpoint** - Receive validation results from Parser  
+✅ **Inbound endpoint** - Receive deployment completion notifications from Parser  
 ✅ **Display logic** - Show formatted reports in tickets
 
 ---
@@ -31,6 +32,8 @@ This guide provides the essential information needed to integrate your ITSM plat
    - [Security Configuration](#-security-configuration)
 3. [Step 1: Configure Outbound Trigger](#-step-1-configure-outbound-trigger-itsm--parser)
 4. [Step 2: Configure Inbound Endpoint](#-step-2-configure-inbound-endpoint-parser--itsm)
+   - [A. Validation Callback](#a-validation-callback-structure)
+   - [B. Deployment Callback](#b-deployment-callback-structure)
 5. [Step 3: Configure Display Logic](#-step-3-configure-display-logic)
 6. [Optional: Traffic Investigation](#-optional-traffic-investigation)
 7. [Testing Checklist](#-testing-checklist)
@@ -67,7 +70,7 @@ Before starting integration, ensure you have:
 # Test parser connectivity
 curl http://parser-host:8080/health
 
-# Expected response:
+ # Expected response:
 # {"status": "healthy", "azure_auth": "valid"}
 ```
 
@@ -82,16 +85,16 @@ This section covers everything ITSM administrators need to know to integrate wit
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                           YOUR ITSM PLATFORM (🔵 Blue)                       │
-│                                                                              │
-│  ┌──────────────┐      ┌─────────────────┐      ┌────────────────────┐    │
-│  │   Ticket     │◄─────│  REST Endpoint  │      │  Automation        │    │
-│  │  (Change/    │      │  (Callback)     │◄─────│  Trigger           │    │
-│  │   Incident)  │      │  Receives       │      │  (Rule/Webhook)    │    │
-│  └──────┬───────┘      │  Results        │      └──────┬─────────────┘    │
+│                           YOUR ITSM PLATFORM (🔵 Blue)                      │
+│                                                                             │
+│  ┌──────────────┐      ┌─────────────────┐      ┌────────────────────┐      │
+│  │   Ticket     │◄─────│  REST Endpoint  │      │  Automation        │      │
+│  │  (Change/    │      │  (Callback)     │◄─────│  Trigger           │      │
+│  │   Incident)  │      │  Receives       │      │  (Rule/Webhook)    │      │
+│  └──────┬───────┘      │  Results        │      └──────┬─────────────┘      │
 │         │              └─────────▲────────┘             │                   │
-│         │ User Views           │ ⏱️ 0-155s              │ ⏱️ ~1ms           │
-│         │ Report         Updates Ticket           Sends Request            │
+│         │ User Views           │ ⏱️ 0-155s              │ ⏱️ ~1ms          │
+│         │ Report         Updates Ticket           Sends Request             │
 └─────────┼──────────────────────┼────────────────────────┼───────────────────┘
           │                      │                        │
           │                      │                        ▼
@@ -125,6 +128,9 @@ This section covers everything ITSM administrators need to know to integrate wit
 Legend:
 🔵 ITSM Platform  🟢 Parser Service  🟠 Azure Cloud
 ⏱️ Performance annotations (timing estimates)
+
+Note: This diagram shows the validation flow (Steps 1-8). After validation, the deployment flow (Steps 9-15) 
+involves Azure DevOps Pipeline → Parser → ITSM callback, which happens hours or days later after human approval.
 ```
 
 ### Request/Response Flow
@@ -175,6 +181,43 @@ Legend:
         │
         ▼
 8. User reviews results
+
+═══════════════════════════════════════════════════════════════════
+
+9. User approves ticket (manual review)
+        │
+        ▼
+10. Azure DevOps Pipeline deploys rules
+        │
+        ▼
+11. Pipeline detects [AZFW-AUTOMATION] marker in commit
+        │
+        ▼
+12. Pipeline → Parser
+   POST http://parser:8080/deployment-callback
+   {
+     "ticketId": "CHG0012345",
+     "status": "success",
+     "prNumber": "123",
+     "commitId": "abc123",
+     "pipelineUrl": "https://dev.azure.com/..."
+   }
+        │
+        ▼
+13. Parser → ITSM (with retry)
+   POST https://itsm/api/callback/deployment
+   {
+     "ticket_id": "CHG0012345",
+     "status": "deployment_success",
+     "message": "Firewall rules deployed successfully",
+     "deployment_details": {...}
+   }
+        │
+        ▼
+14. ITSM updates ticket: "✅ Deployment Complete"
+        │
+        ▼
+15. User closes ticket
 ```
 
 ---
@@ -443,14 +486,18 @@ HTTP 202 Accepted
 
 ### What to Configure
 
-Create a REST API endpoint that:
-- Accepts POST requests from Parser
-- Parses JSON payload
-- Updates the ticket with results
+Create REST API endpoints that:
+- Accept POST requests from Parser
+- Parse JSON payloads
+- Update tickets with results
 
-### Expected Callback Structure
+**Two types of callbacks:**
+1. **Validation Callback** - Results from rule validation
+2. **Deployment Callback** - Notification when Azure deployment completes
 
-**From Parser to your endpoint:**
+### A. Validation Callback Structure
+
+**From Parser to your endpoint (after validation):**
 
 ```
 POST https://itsm.company.com/api/callback/validate/CHG0012345
@@ -602,6 +649,72 @@ cat output/jobs/20251108-143000_CHG0012345_a3f9/callback_failed.txt
 # Last attempt: 2025-11-08 14:32:35
 # Validation results available in: validation_report_CHG0012345.json
 ```
+
+---
+
+### B. Deployment Callback Structure
+
+**From Parser to your endpoint (after Azure deployment completes):**
+
+```
+POST https://itsm.company.com/api/callback/deployment/CHG0012345
+Content-Type: application/json
+```
+
+**Deployment Callback Payload:**
+```json
+{
+  "ticket_id": "CHG0012345",
+  "status": "deployment_success",
+  
+  "summary": "Firewall rules deployed successfully via Pipeline #456",
+  
+  "message": "✅ DEPLOYMENT COMPLETE\n\nFirewall policy has been updated in Azure.\n\n📦 DEPLOYMENT DETAILS\n• Pull Request: #123\n• Pipeline Build: #456\n• Commit: abc123def\n• Deployed Rules: 5\n• Timestamp: 2025-11-08 14:35:20 UTC\n\n🔗 Links:\n• Pipeline: https://dev.azure.com/.../buildId=456\n• Pull Request: https://dev.azure.com/.../pullrequest/123\n\n🎉 The requested firewall rules are now active in production.",
+  
+  "details": {
+    "pr_number": "123",
+    "pr_url": "https://dev.azure.com/org/project/_git/repo/pullrequest/123",
+    "commit_id": "abc123def456",
+    "pipeline_url": "https://dev.azure.com/org/project/_build/results?buildId=456",
+    "deployed_rules": 5,
+    "deployment_name": "FwpRCG-Deploy-456",
+    "timestamp": "2025-11-08T14:35:20Z"
+  }
+}
+```
+
+### Deployment Callback Fields
+
+| Field | Type | Description | How to Use |
+|-------|------|-------------|------------|
+| `ticket_id` | string | Your ticket identifier | Use to lookup ticket |
+| `status` | string | Always `"deployment_success"` | Update ticket to resolved/closed |
+| **`summary`** | string | **One-line deployment status** | Display in ticket status field |
+| **`message`** | string | **Formatted deployment report** | Add to work notes/comments |
+| `details` | object | Structured deployment metadata | Optional: map to custom fields |
+
+### What Your Deployment Endpoint Should Do
+
+1. **Receive POST request** with deployment notification
+2. **Parse JSON** and extract `ticket_id` and `message`
+3. **Lookup ticket** using `ticket_id`
+4. **Update ticket:**
+   - Add `message` to work notes/comments
+   - Update status to "Deployed" or "Resolved"
+   - Set resolution notes with deployment details
+   - Optionally close ticket automatically
+5. **Return success response:**
+   ```json
+   HTTP 200 OK
+   {"success": true, "message": "Ticket CHG0012345 marked as deployed"}
+   ```
+
+**⚠️ Important Notes:**
+- Deployment callbacks only occur when **Azure DevOps pipeline successfully completes**
+- Pipeline must detect `[AZFW-AUTOMATION] Ticket: CHG0012345` marker in commit message
+- If deployment fails, **no callback is sent** (failures handled manually via pipeline logs)
+- Callbacks have retry logic (same as validation callbacks - 5 attempts with exponential backoff)
+
 ---
 
 ## 📊 Step 3: Configure Display Logic
@@ -755,6 +868,12 @@ Rules (paste in ticket):
 - Wait 30-60 seconds
 - Check for traffic report in work notes
 
+**5. Test Deployment Callback (If Azure DevOps Integration Enabled)**
+- Approve the test ticket
+- Wait for Azure DevOps pipeline to deploy rules
+- Check ticket for deployment completion notification (within 5-10 minutes)
+- ✅ Expected: Work notes show "✅ DEPLOYMENT COMPLETE" with pipeline links
+
 ### Error Handling Test
 
 **Test invalid rule:**
@@ -849,6 +968,20 @@ tail -f /path/to/parser/output/parser.log | grep callback
 - ✅ Increase investigation period from 30 to 60 days
 - ✅ Verify IP addresses match actual traffic
 
+### Issue: Deployment Callback Not Received
+
+**Symptoms:** Pipeline succeeded but ticket not updated with deployment notification
+
+**Solutions:**
+- ✅ Verify commit message contains `[AZFW-AUTOMATION] Ticket: {ticketId}` marker
+- ✅ Check Azure DevOps pipeline has callback task configured
+- ✅ Verify `AZFW_AUTOMATION_URL` variable is set in pipeline
+- ✅ Check firewall allows Azure DevOps agents → Parser → ITSM traffic
+- ✅ Verify callback URL was stored during initial validation
+- ✅ Review Parser logs for retry attempts and errors
+
+**Note:** Deployment callbacks only fire for **automation-triggered** pipeline runs (with marker), not manual runs.
+
 ---
 
 ## 📞 Getting Help
@@ -892,7 +1025,10 @@ curl http://parser-host:8080/health
 |--------|----------|---------|----------|
 | POST | `/webhook` | Trigger validation | 202 Accepted |
 | POST | `/investigate/{ticket_id}` | Trigger investigation | 202 Accepted |
+| POST | `/deployment-callback` | Receive deployment status | 200 OK |
 | GET | `/health` | Check status | 200 OK |
+
+**Note:** `/deployment-callback` is called **by Azure DevOps Pipeline**, not by ITSM. Parser then forwards the notification to ITSM.
 
 ### Required Configuration
 
@@ -908,7 +1044,13 @@ curl http://parser-host:8080/health
 ```
 Validation:    https://itsm.company.com/api/callback/validate/CHG0012345
 Investigation: https://itsm.company.com/api/callback/investigate/CHG0012345
+Deployment:    https://itsm.company.com/api/callback/deployment/CHG0012345
 ```
+
+**URL Patterns:**
+- Use different paths (`/validate`, `/investigate`, `/deployment`) or same path with different logic based on payload
+- Parser will POST to the URL you provide in `callbackUrl` field
+- Deployment callbacks use the stored `callbackUrl` from original validation request
 
 ### Sample Request (Copy/Paste Ready)
 
@@ -934,10 +1076,11 @@ curl -X POST http://parser-host:8080/webhook \
 
 ---
 
-**Version:** 1.0  
-**Last Updated:** November 10, 2025  
+**Version:** 1.1  
+**Last Updated:** November 12, 2025  
 **Related Docs:**
 - Full Integration Guide: `ITSM_INTEGRATION_GUIDE_v3.md`
+- Azure DevOps Pipeline Integration: `integration/AZURE_DEVOPS_PIPELINE_INTEGRATION.md`
 - API Reference: `API_REFERENCE.md`
 - Troubleshooting: `TROUBLESHOOTING.md`
 - Rule Validation & RCG Assignment: `features/RULE_VALIDATION.md`
