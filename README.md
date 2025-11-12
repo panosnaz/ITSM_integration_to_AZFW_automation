@@ -152,8 +152,8 @@ involves Azure DevOps Pipeline → Parser → ITSM callback, which happens hours
 2. Automation triggers (status change/button)
         │
         ▼
-3. ITSM → Parser
-   POST http://parser:8080/webhook
+3. ITSM → Parser (url hosted on AppGW)
+   POST http://parser:443/webhook
    {
      "ticketId": "CHG0012345",
      "callbackUrl": "https://itsm/api/callback",
@@ -199,8 +199,8 @@ involves Azure DevOps Pipeline → Parser → ITSM callback, which happens hours
 11. Pipeline detects [AZFW-AUTOMATION] marker in commit
         │
         ▼
-12. Pipeline → Parser
-   POST http://parser:8080/deployment-callback
+12. Pipeline → Parser (url hosted on AppGW)
+   POST http://parser:443/deployment-callback
    {
      "ticketId": "CHG0012345",
      "status": "success",
