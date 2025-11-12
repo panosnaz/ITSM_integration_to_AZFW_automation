@@ -136,7 +136,7 @@ involves Azure DevOps Pipeline → Parser → ITSM callback, which happens hours
 ### Connectivity & Workflow
 
 <p align="center">
-<img src="Connectivity & Workflow.png">
+<img src="Connectivity & Workflow_(agnostic).png">
 </p>
 
 ### Request/Response Flow
