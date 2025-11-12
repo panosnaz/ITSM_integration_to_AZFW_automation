@@ -54,7 +54,7 @@ Before starting integration, ensure you have:
 - [ ] Network firewall approval for Parser ↔ ITSM communication
 
 ### Information Gathering
-- [ ] Parser URL: `http://________:8080`
+- [ ] Parser URL: `http://________:443`
 - [ ] ITSM callback endpoint URL: `https://________/api/callback`
 - [ ] API keys (if authentication enabled)
 - [ ] Test ticket ID for validation
