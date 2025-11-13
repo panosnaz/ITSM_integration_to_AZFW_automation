@@ -373,7 +373,7 @@ You need to know:
 
 **2. Add to Outbound Requests:**
 ```http
-X-API-Key: your-generated-api-key-here
+X-API-Key: api-key
 ```
 
 **3. Configure Parser Callback Authentication:**
@@ -411,7 +411,7 @@ Create automation that triggers when:
 **Headers:**
 ```http
 Content-Type: application/json
-X-API-Key: your-api-key-here  (if authentication enabled)
+X-API-Key: api-key  (if authentication enabled)
 ```
 
 **Request Body:**
@@ -770,7 +770,7 @@ After validation, users can trigger traffic investigation to analyze actual fire
 **Headers:**
 ```http
 Content-Type: application/json
-X-API-Key: your-api-key-here  (if authentication enabled)
+X-API-Key: api-key  (if authentication enabled)
 ```
 
 **Request Body:**
@@ -801,7 +801,7 @@ HTTP 202 Accepted
 
 ### Investigation Callback (Async)
 
-**Sent to your `callback_url` after 10-120 seconds:**
+**Sent to the `callback_url` after 10-120 seconds:**
 
 ```json
 {
@@ -1068,7 +1068,7 @@ Deployment:    https://itsm.company.com/api/callback/deployment/CHG0012345
 ```bash
 curl -X POST https://parser-host/webhook \
   -H "Content-Type: application/json" \
-  -H "X-API-Key: your-api-key" \
+  -H "X-API-Key: api-key" \
   -d '{
     "ticketId": "TEST-001",
     "callbackUrl": "https://itsm.company.com/api/callback/validate/TEST-001",
