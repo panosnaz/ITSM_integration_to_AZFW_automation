@@ -1,6 +1,6 @@
 # ITSM Integration - Quick Start Guide
 
-**Version:** 1.2
+**Version:** 1.2  
 **Last Updated:** November 14, 2025  
 **Audience:** ITSM Administrators  
 **Purpose:** Compact guide to integrate your ITSM with Azure Firewall Policy Automation
@@ -426,7 +426,8 @@ X-API-Key: api-key  (if authentication enabled)
       "ipProtocols": ["TCP"],
       "sourceAddresses": ["10.0.0.0/24"],
       "destinationAddresses": ["192.168.1.0/24"],
-      "destinationPorts": ["443", "80"]
+      "destinationPorts": ["443", "80"],
+      "action": "Allow"
     }
   ]
 }
@@ -439,6 +440,34 @@ X-API-Key: api-key  (if authentication enabled)
 | `ticketId` | string | ✅ Yes | Your ITSM ticket identifier |
 | `callbackUrl` | string | ✅ Yes | URL where Parser sends results |
 | `rules` | array | ✅ Yes | Array of firewall rule objects |
+
+### Rule-Level Parameters
+
+Each rule in the `rules` array supports these key fields:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | ✅ Yes | Unique rule name |
+| `ruleType` | string | ✅ Yes | `NetworkRule` or `ApplicationRule` |
+| `action` | string | ✅ Yes | `Allow` or `Deny` - Determines rule routing |
+| `ipProtocols` | array | NetworkRule only | `["TCP"]`, `["UDP"]`, `["ICMP"]`, `["Any"]` |
+| `sourceAddresses` | array | ✅ Yes | IP/CIDR notation or `["*"]` |
+| `destinationAddresses` | array | NetworkRule only | IP/CIDR or Azure Service Tags |
+| `destinationPorts` | array | NetworkRule only | Port numbers or ranges |
+| `protocols` | array | ApplicationRule only | Protocol objects with type and port |
+| `targetFqdns` | array | ApplicationRule only | FQDNs or FQDN wildcards |
+
+**🔑 Action Field (Rule Routing):**
+
+The `action` field controls how rules are routed to Azure parameter files:
+- **`"Allow"`** → Routes to `fwp-netallow-parameters.bicepparam` or `fwp-appallow-parameters.bicepparam`
+- **`"Deny"`** → Routes to `fwp-netdeny-parameters.bicepparam` or `fwp-appdeny-parameters.bicepparam`
+
+**Important Notes:**
+- The `action` field is **used for routing only** - it does NOT appear in the final Bicep parameter files
+- Each rule can have its own action (Allow or Deny) in the same request
+- Default value: `"Allow"` (if not specified)
+- Values are case-insensitive (`"allow"`, `"Allow"`, `"ALLOW"` all work)
 
 **💡 How Rule Collection Groups (RCGs) are determined:**
 - The Parser **automatically discovers** all RCGs from your Azure Firewall Policy
@@ -459,7 +488,8 @@ X-API-Key: api-key  (if authentication enabled)
   "ipProtocols": ["TCP"],                    // TCP, UDP, ICMP, Any
   "sourceAddresses": ["10.0.0.0/24"],        // IP/CIDR or ["*"]
   "destinationAddresses": ["192.168.1.0/24"], // IP/CIDR or Service Tags
-  "destinationPorts": ["443", "80"]          // Port numbers or ranges
+  "destinationPorts": ["443", "80"],          // Port numbers or ranges
+  "action": "Allow"                          // Allow or Deny
 }
 ```
 
@@ -473,7 +503,8 @@ X-API-Key: api-key  (if authentication enabled)
     {"protocolType": "Http", "port": 80}
   ],
   "sourceAddresses": ["10.0.0.0/24"],
-  "targetFqdns": ["*.microsoft.com", "example.com"]
+  "targetFqdns": ["*.microsoft.com", "example.com"],
+  "action": "Allow"
 }
 ```
 
@@ -860,7 +891,8 @@ Rules (paste in ticket):
       "ipProtocols": ["TCP"],
       "sourceAddresses": ["10.0.0.0/24"],
       "destinationAddresses": ["192.168.1.0/24"],
-      "destinationPorts": ["443"]
+      "destinationPorts": ["443"],
+      "action": "Allow"
     }
   ]
 }
@@ -952,7 +984,8 @@ tail -f /path/to/parser/output/parser.log | grep callback
       "ipProtocols": ["TCP"],
       "sourceAddresses": ["10.0.0.0/24"],
       "destinationAddresses": ["192.168.1.0/24"],
-      "destinationPorts": ["443"]
+      "destinationPorts": ["443"],
+      "action": "Allow"
     }
   ]
 }
@@ -1079,7 +1112,8 @@ curl -X POST https://parser-host/webhook \
         "ipProtocols": ["TCP"],
         "sourceAddresses": ["10.0.0.0/24"],
         "destinationAddresses": ["192.168.1.0/24"],
-        "destinationPorts": ["443"]
+        "destinationPorts": ["443"],
+        "action": "Allow"
       }
     ]
   }'
@@ -1087,7 +1121,7 @@ curl -X POST https://parser-host/webhook \
 
 ---
 
-**Version:** 1.2  
+**Version:** 1.2 
 **Last Updated:** November 14, 2025  
 **Related Docs:**
 - Full Integration Guide: `ITSM_INTEGRATION_GUIDE_v3.md`
