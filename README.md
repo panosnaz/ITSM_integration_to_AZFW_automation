@@ -202,7 +202,7 @@ involves Azure DevOps Pipeline → Parser → ITSM callback, which happens hours
         │
         ▼
 12. Pipeline → Parser (url hosted on AppGW)
-   POST https://parser:443/deployment-callback
+   POST https://parser:443/pipeline-callback
    {
      "ticketId": "CHG0012345",
      "status": "success",
@@ -1069,10 +1069,10 @@ curl https://parser-host/health
 |--------|----------|---------|----------|
 | POST | `/webhook` | Trigger validation | 202 Accepted |
 | POST | `/investigate/{ticket_id}` | Trigger investigation | 202 Accepted |
-| POST | `/deployment-callback` | Receive deployment status | 200 OK |
+| POST | `/pipeline-callback` | Receive deployment status | 200 OK |
 | GET | `/health` | Check status | 200 OK |
 
-**Note:** `/deployment-callback` is called **by Azure DevOps Pipeline**, not by ITSM. Parser then forwards the notification to ITSM.
+**Note:** `/pipeline-callback` is called **by Azure DevOps Pipeline**, not by ITSM. Parser then forwards the notification to ITSM.
 
 ### Required Configuration
 
