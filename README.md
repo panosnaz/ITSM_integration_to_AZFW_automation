@@ -1,7 +1,7 @@
 # ITSM Integration - Quick Start Guide
 
-**Version:** 1.2  
-**Last Updated:** November 14, 2025  
+**Version:** 1.3  
+**Last Updated:** November 25, 2025  
 **Audience:** ITSM Administrators  
 **Purpose:** Compact guide to integrate your ITSM with Azure Firewall Policy Automation
 
@@ -36,11 +36,15 @@ This guide provides the essential information needed to integrate your ITSM plat
    - [A. Validation Callback](#a-validation-callback-structure)
    - [B. Deployment Callback](#b-deployment-callback-structure)
 5. [Step 3: Configure Display Logic](#-step-3-configure-display-logic)
-6. [Optional: Traffic Investigation](#-optional-traffic-investigation)
-7. [Testing Checklist](#-testing-checklist)
-8. [Troubleshooting](#-troubleshooting)
-9. [Getting Help](#-getting-help)
-10. [Quick Reference](#-quick-reference)
+6. [Error Handling](#-error-handling)
+   - [Understanding Error Responses](#understanding-error-responses)
+   - [Error Categories & Ownership](#error-categories--ownership)
+   - [Handling Different Error Types](#handling-different-error-types)
+7. [Optional: Traffic Investigation](#-optional-traffic-investigation)
+8. [Testing Checklist](#-testing-checklist)
+9. [Troubleshooting](#-troubleshooting)
+10. [Getting Help](#-getting-help)
+11. [Quick Reference](#-quick-reference)
 
 ---
 
@@ -137,7 +141,7 @@ involves Azure DevOps Pipeline → Parser → ITSM callback, which happens hours
 ### Connectivity & Workflow
 
 <p align="center">
-<img src="Connectivity & Workflow_(agnostic).png">
+<img src="../../diagrams/Connectivity & Workflow (agnostic).png">
 </p>
 
 
@@ -788,6 +792,237 @@ If your ITSM supports multiple display fields:
 
 ---
 
+## ⚠️ Error Handling
+
+### Understanding Error Responses
+
+The Parser uses a **two-tier error handling approach**:
+
+1. **Synchronous Errors (Immediate)** - HTTP status codes returned when submitting requests
+2. **Asynchronous Errors (Callbacks)** - Structured error objects in callback payloads
+
+**Both approaches work together** - you always get an HTTP status code, and async callbacks include detailed error information.
+
+### Synchronous Validation Errors
+
+When you POST to `/webhook`, you may receive immediate errors:
+
+```json
+HTTP 400 Bad Request
+{
+  "error": "invalid_request",
+  "message": "Request body must be valid JSON",
+  "retryable": false,
+  "owner": "itsm_admin"
+}
+```
+
+```json
+HTTP 422 Unprocessable Entity
+{
+  "error": "validation_failed",
+  "message": "Rule validation failed",
+  "retryable": false,
+  "owner": "itsm_admin",
+  "details": [
+    {
+      "issue": "Port exceeds maximum 65535",
+      "rule_index": 0,
+      "rule_name": "Allow-KMS",
+      "field": "destinationPorts",
+      "provided_value": ["70000"]
+    }
+  ]
+}
+```
+
+### Asynchronous Processing Errors
+
+If validation starts successfully (HTTP 202 Accepted) but fails during processing, the callback includes an error object:
+
+```json
+{
+  "ticket_id": "CHG0012345",
+  "status": "failed",
+  "message": "Azure API temporarily unavailable",
+  "error": {
+    "category": "azure_unavailable",
+    "message": "Azure API temporarily unavailable. The service is experiencing connectivity issues.",
+    "retryable": true,
+    "owner": "azure_admin",
+    "retry_after": 300
+  }
+}
+```
+
+### Error Categories & Ownership
+
+Understanding **who can fix** each error type helps route issues correctly:
+
+| Error Category | HTTP | Owner | Retryable | Description |
+|----------------|------|-------|-----------|-------------|
+| **Client Errors (ITSM can fix)** |
+| `invalid_request` | 400 | `itsm_admin` | ❌ No | Malformed request (invalid JSON, wrong format) |
+| `invalid_format` | 400 | `itsm_admin` | ❌ No | Field format error (e.g., invalid IP address) |
+| `missing_field` | 400 | `itsm_admin` | ❌ No | Required field not provided |
+| `validation_failed` | 422 | `itsm_admin` | ❌ No | Rule validation errors (field-level details provided) |
+| `invalid_credentials` | 401 | `itsm_admin` | ❌ No | Missing or invalid API key |
+| **Server Errors (Infrastructure/System)** |
+| `azure_unavailable` | 503 | `azure_admin` | ✅ Yes (5min) | Azure API temporarily unavailable |
+| `azure_timeout` | 504 | `azure_admin` | ✅ Yes (5min) | Azure API timeout |
+| `azure_auth_failed` | 503 | `azure_admin` | ✅ Yes (30min) | Parser managed identity authentication failed |
+| `resource_not_found` | 404 | `azure_admin` | ❌ No | Azure Firewall Policy or resource not found |
+| `internal_error` | 500 | `system_admin` | ✅ Yes (5min) | Unexpected system error |
+| `cache_error` | 500 | `system_admin` | ✅ Yes (2min) | Cache service error |
+| **Processing Errors** |
+| `rule_conflict` | 409 | `itsm_admin` | ❌ No | Rule conflicts with existing policy rules |
+| `quota_exceeded` | 429 | `azure_admin` | ✅ Yes (10min) | Azure Firewall rule quota exceeded |
+
+**Key Fields:**
+
+- **`owner`** - Who should fix the issue:
+  - `itsm_admin` = ITSM team can fix (review request, fix data)
+  - `azure_admin` = Azure infrastructure team (connectivity, permissions, quotas)
+  - `system_admin` = Parser application team (code bugs, system issues)
+
+- **`retryable`** - Can the request be retried?
+  - `true` = Temporary issue, retry after waiting
+  - `false` = Permanent issue, fix required before retry
+
+- **`retry_after`** - Recommended wait time (seconds) before retry
+
+### Handling Different Error Types
+
+**1. Client Errors (4xx) - ITSM Should Fix**
+
+```json
+HTTP 422 Unprocessable Entity
+{
+  "error": "validation_failed",
+  "owner": "itsm_admin",
+  "retryable": false,
+  "details": [...]
+}
+```
+
+**Action:**
+- ✅ Update ticket with error details
+- ✅ Display field-level validation errors from `details` array
+- ✅ Notify requester to fix data
+- ❌ **Don't retry** - permanent issue requiring data correction
+
+**2. Azure Errors (503/504) - Retry After Waiting**
+
+```json
+{
+  "error": {
+    "category": "azure_unavailable",
+    "owner": "azure_admin",
+    "retryable": true,
+    "retry_after": 300
+  }
+}
+```
+
+**Action:**
+- ✅ Update ticket: "Azure API temporarily unavailable. Auto-retry in 5 minutes."
+- ✅ Schedule automatic retry after `retry_after` seconds
+- ✅ Route to Azure infrastructure team if persists after 3 retries
+- ✅ Check Parser health endpoint: `GET /health`
+
+**3. Authentication Errors (401) - Check API Key**
+
+```json
+HTTP 401 Unauthorized
+{
+  "error": "invalid_credentials",
+  "owner": "itsm_admin",
+  "retryable": false
+}
+```
+
+**Action:**
+- ✅ Verify `X-API-Key` header is present
+- ✅ Check API key value with Parser admin
+- ✅ Update ITSM automation configuration if incorrect
+- ❌ **Don't retry** - fix authentication first
+
+**4. System Errors (500) - Escalate**
+
+```json
+HTTP 500 Internal Server Error
+{
+  "error": "internal_error",
+  "owner": "system_admin",
+  "retryable": true,
+  "retry_after": 300
+}
+```
+
+**Action:**
+- ✅ Retry after 5 minutes (may be transient)
+- ✅ If persists, escalate to Parser application team
+- ✅ Include job_id and timestamp in escalation
+- ✅ Check Parser logs: `tail -f output/parser.log`
+
+### Quick Reference: Error Response Format
+
+**Synchronous (HTTP response):**
+```json
+{
+  "error": "error_category",           // Machine-readable error type
+  "message": "Human-readable message", // Display to users
+  "retryable": true/false,             // Can it be retried?
+  "owner": "itsm_admin",               // Who should fix it?
+  "retry_after": 300,                  // Seconds to wait (if retryable)
+  "details": [...]                     // Field-level errors (if validation_failed)
+}
+```
+
+**Asynchronous (callback payload):**
+```json
+{
+  "ticket_id": "CHG0012345",
+  "status": "failed",
+  "message": "User-friendly error message",
+  "error": {
+    "category": "azure_unavailable",
+    "message": "Detailed technical message",
+    "retryable": true,
+    "owner": "azure_admin",
+    "retry_after": 300
+  }
+}
+```
+
+### Status Polling (Fallback)
+
+If callbacks fail, poll for job status:
+
+```bash
+GET /status/{ticket_id}
+```
+
+**Response:**
+```json
+{
+  "ticket_id": "CHG0012345",
+  "job_id": "20251108_143000_CHG0012345",
+  "status": "failed",
+  "error": {
+    "category": "azure_timeout",
+    "message": "Azure API timeout",
+    "retryable": true,
+    "owner": "azure_admin",
+    "retry_after": 300
+  }
+}
+```
+
+**For complete error handling documentation, see:** `docs/ITSM_ERROR_HANDLING.md`
+
+---
+
 ## 🔍 Optional: Traffic Investigation
 
 ### When to Use
@@ -1121,8 +1356,8 @@ curl -X POST https://parser-host/webhook \
 
 ---
 
-**Version:** 1.2 
-**Last Updated:** November 14, 2025  
+**Version:** 1.3
+**Last Updated:** November 25, 2025  
 **Related Docs:**
 - Full Integration Guide: `ITSM_INTEGRATION_GUIDE_v3.md`
 - Azure DevOps Pipeline Integration: `integration/AZURE_DEVOPS_PIPELINE_INTEGRATION.md`
