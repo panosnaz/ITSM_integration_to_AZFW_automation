@@ -1,7 +1,7 @@
 # ITSM Integration - Quick Start Guide
 
-**Version:** 1.3  
-**Last Updated:** November 25, 2025  
+**Version:** 1.4  
+**Last Updated:** December 17, 2025  
 **Audience:** ITSM Administrators  
 **Purpose:** Compact guide to integrate your ITSM with Azure Firewall Policy Automation
 
@@ -1356,8 +1356,8 @@ curl -X POST https://parser-host/webhook \
 
 ---
 
-**Version:** 1.3
-**Last Updated:** November 25, 2025  
+**Version:** 1.4  
+**Last Updated:** December 17, 2025  
 **Related Docs:**
 - Full Integration Guide: `ITSM_INTEGRATION_GUIDE_v3.md`
 - Azure DevOps Pipeline Integration: `integration/AZURE_DEVOPS_PIPELINE_INTEGRATION.md`
