@@ -1,7 +1,7 @@
 # ITSM Integration - Quick Start Guide
 
 **Version:** 1.4  
-**Last Updated:** December 17, 2025  
+**Last Updated:** December 18, 2025  
 **Audience:** ITSM Administrators  
 **Purpose:** Compact guide to integrate your ITSM with Azure Firewall Policy Automation
 
@@ -73,10 +73,12 @@ Before starting integration, ensure you have:
 ### Parser Access Verification
 ```bash
 # Test parser connectivity (via Application Gateway)
-curl https://parser-host/health
+curl https://parser-host/api/health
 
 # Expected response:
 # {"status": "healthy", "azure_auth": "valid"}
+
+# Note: Legacy URL /health also supported for backward compatibility
 ```
 
 
@@ -159,12 +161,13 @@ involves Azure DevOps Pipeline → Parser → ITSM callback, which happens hours
         │
         ▼
 3. ITSM → Parser (url hosted on AppGW)
-   POST https://parser:443/webhook
+   POST https://parser:443/api/webhook
    {
      "ticketId": "CHG0012345",
      "callbackUrl": "https://itsm/api/callback",
      "rules": [...]
    }
+   Note: Legacy URL /webhook also supported
         │
         ▼
 4. Parser responds immediately
@@ -206,7 +209,7 @@ involves Azure DevOps Pipeline → Parser → ITSM callback, which happens hours
         │
         ▼
 12. Pipeline → Parser (url hosted on AppGW)
-   POST https://parser:443/pipeline-callback
+   POST https://parser:443/api/pipeline-callback
    {
      "ticketId": "CHG0012345",
      "status": "success",
@@ -214,6 +217,7 @@ involves Azure DevOps Pipeline → Parser → ITSM callback, which happens hours
      "commitId": "abc123",
      "pipelineUrl": "https://dev.azure.com/..."
    }
+   Note: Legacy URL /pipeline-callback also supported
         │
         ▼
 13. Parser → ITSM (with retry)
@@ -339,7 +343,7 @@ Timeout Recommendations:
 | **Expired Cache** | 180s | 3s | Cache refresh in background |
 | **Azure Policy Changed** | 220s | 3s | Requires cache invalidation |
 
-**💡 Tip:** For better performance, call `POST /health` endpoint periodically to keep cache warm.
+**💡 Tip:** For better performance, call `GET /api/health` endpoint periodically to keep cache warm.
 
 ---
 
@@ -365,7 +369,7 @@ Allow: Application Gateway → ITSM:443 (HTTPS)
 You need to know:
 - **Parser URL:** `https://parser-host` (e.g., `https://azfw-parser.contoso.com`)
 - **API Key:** (optional) For authentication
-- **Health Check:** `GET https://parser-host/health` should return `{"status": "healthy"}`
+- **Health Check:** `GET https://parser-host/api/health` should return `{"status": "healthy"}` (legacy `/health` also works)
 
 ---
 
@@ -1098,8 +1102,9 @@ HTTP 202 Accepted
 
 - [ ] **Connectivity:** Can ITSM reach Parser (via App Gateway)?
   ```bash
-  curl https://parser-host/health
+  curl https://parser-host/api/health
   # Expected: {"status": "healthy"}
+  # Note: Legacy /health also supported
   ```
 
 - [ ] **App Gateway → ITSM:** Can App Gateway reach your callback endpoint?
@@ -1232,7 +1237,7 @@ tail -f /path/to/parser/output/parser.log | grep callback
 
 **Solutions:**
 - ✅ Increase timeout in ITSM HTTP client (recommended: 30-60 seconds)
-- ✅ Verify Parser is accessible: `curl https://parser-host/health`
+- ✅ Verify Parser is accessible: `curl https://parser-host/api/health` (or legacy `/health`)
 - ✅ Check App Gateway and backend health status
 - ✅ Verify Azure API connectivity from Parser
 
@@ -1269,7 +1274,8 @@ tail -f /path/to/parser/output/parser.log | grep callback
 
 ```bash
 # Parser health (via Application Gateway)
-curl https://parser-host/health
+curl https://parser-host/api/health
+# or legacy: curl https://parser-host/health
 
 # Expected response:
 {
@@ -1300,14 +1306,21 @@ curl https://parser-host/health
 
 ### Parser Endpoints
 
-| Method | Endpoint | Purpose | Response |
-|--------|----------|---------|----------|
-| POST | `/webhook` | Trigger validation | 202 Accepted |
-| POST | `/investigate/{ticket_id}` | Trigger investigation | 202 Accepted |
-| POST | `/pipeline-callback` | Receive deployment status | 200 OK |
-| GET | `/health` | Check status | 200 OK |
+| Method | New Endpoint (Recommended) | Legacy Endpoint | Purpose | Response |
+|--------|---------------------------|-----------------|---------|----------|
+| POST | `/api/webhook` | `/webhook` | Trigger validation | 202 Accepted |
+| POST | `/api/investigate/{ticket_id}` | `/investigate/{ticket_id}` | Trigger investigation | 202 Accepted |
+| POST | `/api/pipeline-callback` | `/pipeline-callback` | Receive deployment status | 200 OK |
+| GET | `/api/health` | `/health` | Check status | 200 OK |
+| GET | `/api/status/{ticket_id}` | `/status/{ticket_id}` | Check job status | 200 OK |
+| GET | `/api/cache-status` | `/cache-status` | Get cache metrics | 200 OK |
+| POST | `/api/invalidate-cache` | `/invalidate-cache` | Clear cache | 200 OK |
+| GET | `/api/investigate/status` | `/investigate/status` | Log Analytics config | 200 OK |
 
-**Note:** `/pipeline-callback` is called **by Azure DevOps Pipeline**, not by ITSM. Parser then forwards the notification to ITSM.
+**⚠️ Notes:** 
+- Both new (`/api/*`) and legacy URLs are supported for backward compatibility
+- `/api/pipeline-callback` (formerly `/pipeline-callback`) is called **by Azure DevOps Pipeline**, not by ITSM
+- Parser forwards deployment notifications to ITSM automatically
 
 ### Required Configuration
 
@@ -1357,7 +1370,7 @@ curl -X POST https://parser-host/webhook \
 ---
 
 **Version:** 1.4  
-**Last Updated:** December 17, 2025  
+**Last Updated:** December 18, 2025   
 **Related Docs:**
 - Full Integration Guide: `ITSM_INTEGRATION_GUIDE_v3.md`
 - Azure DevOps Pipeline Integration: `integration/AZURE_DEVOPS_PIPELINE_INTEGRATION.md`
