@@ -425,7 +425,8 @@ Create automation that triggers when:
 
 ### Expected Request Structure
 
-**Endpoint:** `POST https://parser-host/webhook`
+**Endpoint:** `POST https://parser-host/api/webhook`  
+*(Legacy endpoint `/webhook` also supported)*
 
 **Headers:**
 ```http
@@ -1384,7 +1385,7 @@ Deployment:    https://itsm.company.com/api/callback/deployment/CHG0012345
 ### Sample Request (Copy/Paste Ready)
 
 ```bash
-curl -X POST https://parser-host/webhook \
+curl -X POST https://parser-host/api/webhook \
   -H "Content-Type: application/json" \
   -H "X-API-Key: api-key" \
   -d '{
@@ -1403,6 +1404,8 @@ curl -X POST https://parser-host/webhook \
     ]
   }'
 ```
+
+**Note:** Legacy endpoint `/webhook` (without `/api` prefix) is still supported for backward compatibility, but `/api/webhook` is recommended for new integrations.
 
 ---
 
