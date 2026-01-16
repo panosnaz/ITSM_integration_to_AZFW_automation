@@ -1,7 +1,7 @@
 # ITSM Integration - Quick Start Guide
 
-**Version:** 1.4  
-**Last Updated:** December 18, 2025  
+**Version:** 1.4.1  
+**Last Updated:** January 16, 2026  
 **Audience:** ITSM Administrators  
 **Purpose:** Compact guide to integrate your ITSM with Azure Firewall Policy Automation
 
@@ -76,7 +76,18 @@ Before starting integration, ensure you have:
 curl https://parser-host/api/health
 
 # Expected response:
-# {"status": "healthy", "azure_auth": "valid"}
+# {
+#   "status": "healthy",
+#   "timestamp": "2026-01-16T12:44:35Z",
+#   "version": "2.1.0",
+#   "checks": {
+#     "azure_auth": {"ok": true, "message": "Azure credentials valid"},
+#     "cache": {"ok": true, "message": "Cache operational (40 items)"},
+#     "worker_pool": {"ok": true, "message": "Thread pool operational"},
+#     "itsm": {"ok": true, "message": "ITSM configured"}
+#   },
+#   "metrics": {"uptime_seconds": 3600, "active_jobs": 0, "total_jobs_tracked": 5}
+# }
 
 # Note: Legacy URL /health also supported for backward compatibility
 ```
@@ -1280,9 +1291,35 @@ curl https://parser-host/api/health
 # Expected response:
 {
   "status": "healthy",
-  "azure_auth": "valid",
-  "cache_status": "ready",
-  "uptime_seconds": 3600
+  "timestamp": "2026-01-16T12:44:35Z",
+  "version": "2.1.0",
+  "checks": {
+    "azure_auth": {
+      "ok": true,
+      "message": "Azure credentials valid",
+      "details": {"method": "Managed Identity", "subscription": "..."}
+    },
+    "cache": {
+      "ok": true,
+      "message": "Cache operational (40 items)",
+      "details": {"items": 40, "size_mb": 2.03, "hits": 0, "misses": 0}
+    },
+    "worker_pool": {
+      "ok": true,
+      "message": "Thread pool operational",
+      "details": {"max_workers": 4, "queue_depth": 0}
+    },
+    "itsm": {
+      "ok": true,
+      "message": "ITSM configured",
+      "details": {"enabled": true}
+    }
+  },
+  "metrics": {
+    "uptime_seconds": 3600,
+    "active_jobs": 0,
+    "total_jobs_tracked": 5
+  }
 }
 ```
 
@@ -1369,8 +1406,8 @@ curl -X POST https://parser-host/webhook \
 
 ---
 
-**Version:** 1.4  
-**Last Updated:** December 18, 2025   
+**Version:** 1.4.1  
+**Last Updated:** January 16, 2026   
 **Related Docs:**
 - Full Integration Guide: `ITSM_INTEGRATION_GUIDE_v3.md`
 - Azure DevOps Pipeline Integration: `integration/AZURE_DEVOPS_PIPELINE_INTEGRATION.md`
