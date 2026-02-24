@@ -1577,6 +1577,28 @@ curl https://parser-host/api/health
       "details": {
         "enabled": false
       }
+    },
+    "authentication": {
+      "ok": true,
+      "message": "Authentication disabled (all endpoints open)",
+      "details": {
+        "status": "⚠️ insecure",
+        "incoming": {
+          "enabled": false,
+          "configured": true,
+          "description": "ITSM → Parser (webhook calls)"
+        },
+        "outgoing": {
+          "enabled": false,
+          "configured": true,
+          "description": "Parser → ITSM (callbacks)"
+        },
+        "devops": {
+          "enabled": false,
+          "configured": true,
+          "description": "DevOps → Parser (deployment callbacks)"
+        }
+      }
     }
   },
   
@@ -1617,6 +1639,107 @@ curl https://parser-host/api/health
 | **`metrics`** | Job statistics | `active_jobs`, `success_rate_percent`, `completed_jobs` |
 | **`performance`** | Performance metrics | `cache_hit_rate_percent`, `average_job_duration_seconds` |
 | **`resources`** | System resources | `memory_usage_mb`, `memory_percent`, `output_directory_size_mb` |
+
+**Health Check Details:**
+
+| Check | Purpose | Healthy When |
+|-------|---------|--------------|
+| **`azure_auth`** | Azure credentials | `ok: true` - Managed Identity valid |
+| **`cache`** | Disk cache system | `ok: true` - Cache accessible, items loaded |
+| **`worker_pool`** | Job thread pool | `ok: true` - Threads available, queue not full |
+| **`itsm`** | ITSM callback URLs | `ok: true` - URLs configured (or not required) |
+| **`authentication`** | API key security | `ok: true` - Auth properly configured (or disabled) |
+
+**Authentication Status:**
+
+🔒 **Secure Configuration:**
+```json
+"authentication": {
+  "ok": true,
+  "message": "Authentication enabled (incoming, outgoing)",
+  "details": {
+    "status": "🔒 secure",
+    "incoming": {"enabled": true, "configured": true},
+    "outgoing": {"enabled": true, "configured": true}
+  }
+}
+```
+
+⚠️ **Insecure Configuration (Dev/Test only):**
+```json
+"authentication": {
+  "ok": true,
+  "message": "Authentication disabled (all endpoints open)",
+  "details": {
+    "status": "⚠️ insecure",
+    "incoming": {"enabled": false, "configured": true},
+    "outgoing": {"enabled": false, "configured": true}
+  }
+}
+```
+
+❌ **Misconfigured (Error):**
+```json
+"authentication": {
+  "ok": false,
+  "message": "Authentication misconfigured",
+  "details": {
+    "status": "❌ error",
+    "incoming": {"enabled": true, "configured": false}  // API key missing!
+  }
+}
+```
+
+**ITSM Callback Metrics:**
+
+When ITSM is configured, the health check includes callback success/failure metrics:
+
+```json
+"itsm": {
+  "ok": true,
+  "message": "ITSM configured (validation + deployment)",
+  "details": {
+    "enabled": true,
+    "validation_url_set": true,
+    "deployment_url_set": true,
+    "legacy_url_set": true,
+    "callback_metrics": {
+      "total_attempts": 145,
+      "total_successes": 142,
+      "total_failures": 3,
+      "success_rate_percent": 97.93,
+      "last_24h_attempts": 45,
+      "last_24h_success": 44,
+      "last_24h_failures": 1,
+      "last_24h_success_rate_percent": 97.78,
+      "last_success_time": "2026-02-24T12:45:30Z",
+      "last_failure_time": "2026-02-24T10:15:22Z",
+      "last_failure_reason": "timeout"
+    }
+  }
+}
+```
+
+**Callback Metrics Interpretation:**
+
+| Metric | Description | Healthy When |
+|--------|-------------|--------------|
+| `success_rate_percent` | Overall callback success rate | ≥ 95% |
+| `last_24h_success_rate_percent` | Recent success rate | ≥ 95% |
+| `last_failure_reason` | Most recent failure cause | `null` (no recent failures) |
+| `last_failure_time` | When last failure occurred | > 1 hour ago |
+
+**Common Failure Reasons:**
+- `timeout`: ITSM endpoint took > 10 seconds to respond
+- `connection_error`: Could not reach ITSM endpoint (network/DNS issue)
+- `http_500`: ITSM server error (service unavailable)
+- `http_403`: Authentication failure (invalid API key)
+- `http_404`: ITSM endpoint not found (URL misconfigured)
+
+**Alert Conditions:**
+- ⚠️ Warning: `success_rate_percent < 90%` - Investigate ITSM endpoint reliability
+- 🚨 Critical: `success_rate_percent < 75%` - ITSM integration degraded
+- ℹ️ Info: `last_failure_reason: "timeout"` - Consider increasing `ITSM_CALLBACK_TIMEOUT`
 
 **Interpreting Health Status:**
 
