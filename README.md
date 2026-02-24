@@ -1,7 +1,7 @@
 # ITSM Integration - Quick Start Guide
 
-**Version:** 1.4.1  
-**Last Updated:** January 16, 2026  
+**Version:** 1.6.0  
+**Last Updated:** February 24, 2026  
 **Audience:** ITSM Administrators  
 **Purpose:** Compact guide to integrate your ITSM with Azure Firewall Policy Automation
 
@@ -78,18 +78,37 @@ curl https://parser-host/api/health
 # Expected response:
 # {
 #   "status": "healthy",
-#   "timestamp": "2026-01-16T12:44:35Z",
-#   "version": "2.1.0",
+#   "timestamp": "2026-02-24T09:35:00Z",
+#   "version": "3.2.2",
+#   "uptime_seconds": 344,
+#   "active_jobs": 0,
+#   "readiness": {
+#     "phase": "ready",
+#     "cache_warmed": true,
+#     "auth_validated": true
+#   },
+#   "operational": {
+#     "environment": "prod",
+#     "hostname": "ca-azfw-policy-automation-prod--build-237332-6486cdd479-ndhtm",
+#     "container_version": "v3.2.2-20260224T092556Z-6a87269",
+#     "git_commit": "6a87269"
+#   },
 #   "checks": {
 #     "azure_auth": {"ok": true, "message": "Azure credentials valid"},
-#     "cache": {"ok": true, "message": "Cache operational (40 items)"},
+#     "cache": {"ok": true, "message": "Cache operational (41 items)"},
 #     "worker_pool": {"ok": true, "message": "Thread pool operational"},
-#     "itsm": {"ok": true, "message": "ITSM configured"}
+#     "itsm": {"ok": true, "message": "ITSM not configured (optional)"}
 #   },
-#   "metrics": {"uptime_seconds": 3600, "active_jobs": 0, "total_jobs_tracked": 5}
+#   "metrics": {"uptime_seconds": 344, "active_jobs": 0, "success_rate_percent": 100},
+#   "performance": {"cache_hit_rate_percent": 0, "average_job_duration_seconds": 0},
+#   "resources": {"memory_usage_mb": 131.14, "memory_percent": 3.55}
 # }
 
 # Note: Legacy URL /health also supported for backward compatibility
+# Key fields to verify:
+#   - status: "healthy" (service is running)
+#   - readiness.phase: "ready" (cache warmed, auth validated)
+#   - checks.*.ok: true (all subsystems operational)
 ```
 
 
@@ -388,21 +407,38 @@ You need to know:
 
 #### API Key Authentication (Recommended)
 
-**1. Get API Key from Parser Administrator**
+**Two-Way Authentication:**
 
-**2. Add to Outbound Requests:**
-```http
-X-API-Key: api-key
-```
+**1. Incoming Webhook Authentication (ITSM → Parser)**
+   - When ITSM sends validation requests TO Parser `/api/webhook` endpoint
+   - Get API key from Parser Administrator
+   - Add to outbound requests:
+     ```http
+     X-API-Key: your-api-key-here
+     ```
 
-**3. Configure Parser Callback Authentication:**
-
-If your ITSM callback endpoint requires authentication, provide these details to Parser admin:
-- **Auth Type:** API Key / OAuth 2.0 / Basic Auth
-- **Header Name:** (e.g., `X-API-Key`, `Authorization`)
-- **Credentials:** API key or token
-
-Parser will include authentication in callbacks to your ITSM.
+**2. Outgoing Callback Authentication (Parser → ITSM)**
+   - When Parser sends validation/deployment results TO your ITSM endpoints
+   - Optional - only needed if your ITSM callback endpoints require authentication
+   - Provide these details to Parser Administrator:
+     - **Auth Type:** API Key / OAuth 2.0 / Basic Auth
+     - **Header Name:** (e.g., `X-API-Key`, `Authorization`)
+     - **Credentials:** API key or token
+   
+   Parser environment configuration:
+   ```bash
+   # Enable callback authentication
+   ITSM_CALLBACK_AUTH_ENABLED=true
+   ITSM_CALLBACK_API_KEY=your-itsm-api-key
+   ITSM_CALLBACK_API_KEY_HEADER=X-API-Key  # default
+   ```
+   
+   Parser will include authentication headers when calling your callback endpoints:
+   ```http
+   POST https://itsm.com/api/callback/validate/CHG0012345
+   Content-Type: application/json
+   X-API-Key: your-itsm-api-key
+   ```
 
 #### TLS/HTTPS (Production)
 
@@ -458,8 +494,27 @@ X-API-Key: api-key  (if authentication enabled)
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `ticketId` | string | ✅ Yes | Your ITSM ticket identifier |
-| `callbackUrl` | string | ✅ Yes | URL where Parser sends results |
+| `callbackUrl` | string | ⚠️ Optional | **Legacy field**: URL where Parser sends validation results (deprecated - use environment config instead) |
 | `rules` | array | ✅ Yes | Array of firewall rule objects |
+
+**⚠️ Callback URL Configuration:**
+
+- **Recommended**: Configure callback URLs in Parser environment variables:
+  - `ITSM_VALIDATION_CALLBACK_URL` - For validation results (e.g., `https://itsm.com/api/callback/validate/{ticketId}`)
+  - `ITSM_DEPLOYMENT_CALLBACK_URL` - For deployment status (e.g., `https://itsm.com/api/callback/deployment/{ticketId}`)
+  - Uses `{ticketId}` placeholder - automatically replaced with actual ticket ID
+  
+- **Legacy**: Include `callbackUrl` in request body (still supported for backward compatibility)
+  - If provided, overrides environment configuration for validation callback only
+  - **🔄 Automatic Multi-ITSM Routing**: Parser automatically extracts and stores the base URL for deployment callbacks
+    - Example: If QA ITSM sends `"callbackUrl": "https://itsm-qa.com/api/callback/CHG001"`, deployment callbacks automatically route to `https://itsm-qa.com/api/callback/deployment/CHG001`
+    - This enables multiple ITSM environments (QA, Prod) to work with a single Parser instance without configuration changes
+    - Falls back to environment-configured URL if `callbackUrl` not provided in request
+
+**💡 Multi-ITSM Scenarios:**
+- If you have multiple ITSM environments (QA and Production) accessing the same Parser instance:
+  - **Option 1 (Automatic)**: Include environment-specific `callbackUrl` in webhook requests - Parser will remember and route deployment callbacks correctly
+  - **Option 2 (Manual)**: Configure Parser with just one environment's URLs - only that environment will receive deployment callbacks
 
 ### Rule-Level Parameters
 
@@ -548,60 +603,132 @@ HTTP 202 Accepted
 
 ### What to Configure
 
-Create REST API endpoints that:
-- Accept POST requests from Parser
-- Parse JSON payloads
-- Update tickets with results
+Create **two separate REST API endpoints** - one for each lifecycle phase:
 
-**Two types of callbacks:**
-1. **Validation Callback** - Results from rule validation
-2. **Deployment Callback** - Notification when Azure deployment completes
+**1. Validation Callback Endpoint** - Receives rule validation results
+   - URL Pattern: `https://itsm.company.com/api/callback/validate/{ticketId}`
+   - Purpose: Parser sends rule conflict detection, duplicate analysis, validation results
+   - Posted After: Azure rule validation completes (5-60 seconds after request)
+
+**2. Deployment Callback Endpoint** - Reports deployment success/failure
+   - URL Pattern: `https://itsm.company.com/api/callback/deployment/{ticketId}`
+   - Purpose: Parser reports whether firewall configuration was successfully deployed to Azure
+   - Posted After: Firewall rules deployed to Azure (simple success/failure status)
+
+**URL Templating:** Both endpoints support `{ticketId}` placeholder for dynamic ticket routing.
+- Example: `https://itsm.company.com/api/callback/validate/CHG0012345`
+- The Parser automatically replaces `{ticketId}` with the actual ticket ID at runtime
 
 ### A. Validation Callback Structure
 
-**From Parser to your endpoint (after validation):**
+**From Parser to your validation endpoint:**
 
 ```
 POST https://itsm.company.com/api/callback/validate/CHG0012345
 Content-Type: application/json
+X-API-Key: <optional-authentication-key>
 ```
 
-**Callback Payload:**
+**Success Payload (status: "success"):**
 ```json
 {
-  "ticket_id": "CHG0012345",
+  "ticketId": "CHG0012345",
   "job_id": "20251108-143000_CHG0012345_a3f9",
   "status": "success",
-  
-  "summary": "Validated 5 rules: 3 new, 2 merged, 0 conflicts",
-  
-  "report_text": "═══════════════════════════════════════════════════════════════════════════════\n📊 AZURE FIREWALL VALIDATION REPORT\n═══════════════════════════════════════════════════════════════════════════════\n\n✅ Quick Summary: 3 out of 5 rules are new and ready to deploy\n\n✅ RULE 1: Allow-Web-Traffic\n   Status: New (no conflicts)\n   Type: NetworkRule\n   Protocol: TCP\n   Source: 10.0.0.0/24\n   Destination: 192.168.1.0/24\n   Ports: 443, 80\n\n⚠️  RULE 2: Allow-Database-Access\n   Status: Already Exists\n   Matched existing rule: \"Prod-DB-Access\"\n   Recommendation: Review existing rule or modify name\n\n✅ RULE 3: Allow-SSH-Admin\n   Status: New (no conflicts)\n   Type: NetworkRule\n   Protocol: TCP\n   Source: 10.1.0.0/24\n   Destination: 10.2.0.0/24\n   Ports: 22\n\n───────────────────────────────────────────────────────────────────────────────\n📁 Deployment File Generated:\n   output/jobs/20251108-143000_CHG0012345_a3f9/azfw_new_rule_config_CHG0012345.json\n\n📊 Statistics:\n   • Total Rules: 5\n   • New Rules: 3\n   • Already Exist: 2\n   • Conflicts: 0\n   • Processing Time: 2.3 seconds\n\n✅ Next Steps:\n   1. Review validation results above\n   2. Optionally click \"Investigate Traffic\" to analyze usage patterns\n   3. Approve ticket to proceed with deployment\n═══════════════════════════════════════════════════════════════════════════════",
-  
-  "message": "Validated 5 rules: 3 new, 2 merged, 0 conflicts\n\n═══════════════════════════════════════════════════════════════════════════════\n📊 AZURE FIREWALL VALIDATION REPORT\n...",
+  "message": "Validated 5 rules: 3 new, 2 merged, 0 conflicts",
   
   "details": {
+    "rules_count": 5,
     "total_rules": 5,
     "validated": 5,
     "merged": 2,
     "conflicts": 0,
     "new_rules": 3,
-    "elapsed_time": 2.34,
-    "deployment_file": "output/jobs/20251108-143000_CHG0012345_a3f9/azfw_new_rule_config_CHG0012345.json"
+    "elapsed_time": "2.34s"
+  },
+  
+  "report": {
+    "summary": "Validated 5 rules: 3 new, 2 merged, 0 conflicts",
+    "new_rules": 3,
+    "merged_rules": 2,
+    "conflicts": 0,
+    "recommendations": [],
+    "rules": [
+      {
+        "name": "Allow-Web-Traffic",
+        "status": "new",
+        "type": "NetworkRule",
+        "protocol": "TCP",
+        "source": "10.0.0.0/24",
+        "destination": "192.168.1.0/24",
+        "ports": ["443", "80"]
+      },
+      {
+        "name": "Allow-Database-Access",
+        "status": "merged",
+        "matched_rule": "Prod-DB-Access",
+        "recommendation": "Review existing rule or modify name"
+      }
+    ]
   }
 }
 ```
 
-### Callback Fields Explanation
+**Processing Payload (status: "processing"):**
+```json
+{
+  "ticketId": "CHG0012345",
+  "job_id": "job_abc123",
+  "status": "processing",
+  "message": "Validation started: checking 5 rules against Azure policies",
+  "details": {
+    "rules_count": 5
+  },
+  "report": {}
+}
+```
+
+**Failure Payload (status: "failed"):**
+```json
+{
+  "ticketId": "CHG0012345",
+  "job_id": "job_abc123",
+  "status": "failed",
+  "message": "Validation failed: Port exceeds maximum 65535",
+  "details": {
+    "total_rules": 5,
+    "exit_code": 1,
+    "elapsed_time": "1.23s",
+    "error_lines": ["Port exceeds maximum 65535"]
+  },
+  "report": {},
+  "error": {
+    "category": "validation_failed",
+    "message": "Validation failed: Port exceeds maximum 65535",
+    "details": [
+      {
+        "issue": "Port exceeds maximum 65535",
+        "rule_index": 0,
+        "rule_name": "Allow-KMS",
+        "field": "destinationPorts",
+        "provided_value": ["70000"]
+      }
+    ]
+  }
+}
+```
+
+### Validation Callback Fields Explanation
 
 | Field | Type | Description | How to Use |
 |-------|------|-------------|------------|
-| `ticket_id` | string | Your ticket identifier | Use to lookup ticket |
+| `ticketId` | string | Your ticket identifier | Use to lookup ticket |
 | `job_id` | string | Parser job identifier | Optional: store for tracking |
-| `status` | string | `success` or `failed` | Update ticket state |
-| **`summary`** | string | **One-line status** | Display in ticket header/status |
-| **`report_text`** | string | **Full formatted report** | Display in work notes/comments |
-| `message` | string | Combined summary + report | Legacy field (use report_text instead) |
-| `details` | object | Structured metrics | Optional: map to custom fields |
+| `status` | string | `processing`, `success`, or `failed` | Update ticket state |
+| **`message`** | string | **Human-readable summary** | Display in ticket header/status |
+| `details` | object | Structured metrics (rules_count, conflicts, merged, etc.) | Optional: map to custom fields |
+| **`report`** | object | **Detailed validation results** | Parse for rule-by-rule breakdown |
+| `error` | object | Error details (only present when status="failed") | Display error information to user |
 
 ### HTTP Status Code Reference
 
@@ -641,20 +768,29 @@ Content-Type: application/json
 
 **⚠️ Important:** Return `200 OK` quickly (< 5 seconds). If ticket update takes longer, process it asynchronously and return success immediately.
 
-### What Your Endpoint Should Do
+### What Your Validation Endpoint Should Do
 
-1. **Receive POST request** with JSON payload
-2. **Parse JSON** and extract `ticket_id` and `report_text`
-3. **Lookup ticket** using `ticket_id`
-4. **Update ticket:**
-   - Add `report_text` to work notes/comments
-   - Optionally update status based on `status` field
-   - Optionally set summary field with `summary` value
-5. **Return success response:**
+1. **Receive POST request** at `/api/callback/validate/{ticketId}` with JSON payload
+2. **Parse JSON** and extract `ticketId`, `status`, and `message`
+3. **Lookup ticket** using `ticketId`
+4. **Update ticket based on status:**
+   - **If status="processing"**: Add message to work notes ("Validation in progress...")
+   - **If status="success"**: 
+     - Add `message` to work notes/comments
+     - Parse `report` object for detailed results
+     - Display conflicts, merged rules, new rules from `details`
+     - Update ticket status to "Validation Complete" or "Ready for Deployment"
+   - **If status="failed"**:
+     - Add error message to work notes
+     - Parse `error.details` array for specific validation issues
+     - Update ticket status to "Validation Failed" or "Requires Correction"
+5. **Return success response quickly (< 5 seconds):**
    ```json
    HTTP 200 OK
-   {"success": true, "message": "Ticket updated"}
+   {"success": true, "message": "Ticket CHG0012345 updated"}
    ```
+
+**⚠️ Important:** Return HTTP 200 quickly. If ticket update processing takes longer, handle it asynchronously and return success immediately.
 
 ### Webhook Retry Logic
 
@@ -716,32 +852,53 @@ cat output/jobs/20251108-143000_CHG0012345_a3f9/callback_failed.txt
 
 ### B. Deployment Callback Structure
 
-**From Parser to your endpoint (after Azure deployment completes):**
+**From Parser to your deployment endpoint:**
 
 ```
 POST https://itsm.company.com/api/callback/deployment/CHG0012345
 Content-Type: application/json
+X-API-Key: <optional-authentication-key>
 ```
 
-**Deployment Callback Payload:**
+**Purpose:** Reports whether the firewall configuration was successfully deployed to Azure or failed.
+This is **NOT** about PR/branch details - just the final deployment outcome.
+
+**Success Payload (status: "deployed"):**
 ```json
 {
-  "ticket_id": "CHG0012345",
-  "status": "deployment_success",
-  
-  "summary": "Firewall rules deployed successfully via Pipeline #456",
-  
-  "message": "✅ DEPLOYMENT COMPLETE\n\nFirewall policy has been updated in Azure.\n\n📦 DEPLOYMENT DETAILS\n• Pull Request: #123\n• Pipeline Build: #456\n• Commit: abc123def\n• Deployed Rules: 5\n• Timestamp: 2025-11-08 14:35:20 UTC\n\n🔗 Links:\n• Pipeline: https://dev.azure.com/.../buildId=456\n• Pull Request: https://dev.azure.com/.../pullrequest/123\n\n🎉 The requested firewall rules are now active in production.",
-  
+  "ticketId": "CHG0012345",
+  "job_id": "job_abc123",
+  "status": "deployed",
+  "message": "Firewall rules deployed successfully to Azure",
+  "details": {},
+  "report": {}
+}
+```
+
+**Failure Payload (status: "deployment_failed"):**
+```json
+{
+  "ticketId": "CHG0012345",
+  "job_id": "job_abc123",
+  "status": "deployment_failed",
+  "message": "Deployment failed: Azure API error - Timeout waiting for policy update",
+  "details": {},
+  "report": {}
+}
+```
+
+**Optional Fields (for internal tracking, not emphasized for ITSM):**
+```json
+{
+  "ticketId": "CHG0012345",
+  "job_id": "job_abc123",
+  "status": "deployed",
+  "message": "Firewall rules deployed successfully to Azure",
   "details": {
-    "pr_number": "123",
-    "pr_url": "https://dev.azure.com/org/project/_git/repo/pullrequest/123",
-    "commit_id": "abc123def456",
-    "pipeline_url": "https://dev.azure.com/org/project/_build/results?buildId=456",
-    "deployed_rules": 5,
-    "deployment_name": "FwpRCG-Deploy-456",
-    "timestamp": "2025-11-08T14:35:20Z"
-  }
+    "pr_url": "https://dev.azure.com/.../pullrequest/123",
+    "branch_name": "firewall/rules/CHG0012345"
+  },
+  "report": {}
 }
 ```
 
@@ -749,60 +906,112 @@ Content-Type: application/json
 
 | Field | Type | Description | How to Use |
 |-------|------|-------------|------------|
-| `ticket_id` | string | Your ticket identifier | Use to lookup ticket |
-| `status` | string | Always `"deployment_success"` | Update ticket to resolved/closed |
-| **`summary`** | string | **One-line deployment status** | Display in ticket status field |
-| **`message`** | string | **Formatted deployment report** | Add to work notes/comments |
-| `details` | object | Structured deployment metadata | Optional: map to custom fields |
+| `ticketId` | string | Your ticket identifier | Use to lookup ticket |
+| `job_id` | string | Parser job identifier | Optional: store for tracking |
+| `status` | string | `"deployed"` or `"deployment_failed"` | Update ticket state |
+| **`message`** | string | **Human-readable deployment status** | Display in ticket work notes |
+| `details` | object | Optional metadata (pr_url, branch_name) | For internal tracking only |
+| `report` | object | Empty (no deployment report) | Not used for deployment callbacks |
 
 ### What Your Deployment Endpoint Should Do
 
-1. **Receive POST request** with deployment notification
-2. **Parse JSON** and extract `ticket_id` and `message`
-3. **Lookup ticket** using `ticket_id`
-4. **Update ticket:**
-   - Add `message` to work notes/comments
-   - Update status to "Deployed" or "Resolved"
-   - Set resolution notes with deployment details
-   - Optionally close ticket automatically
-5. **Return success response:**
+1. **Receive POST request** at `/api/callback/deployment/{ticketId}` with deployment status
+2. **Parse JSON** and extract `ticketId`, `status`, and `message`
+3. **Lookup ticket** using `ticketId`
+4. **Update ticket based on status:**
+   - **If status="deployed"**: 
+     - Add success message to work notes ("Firewall rules deployed successfully to Azure")
+     - Update ticket status to "Deployed", "Resolved", or "Closed"
+     - Set resolution notes
+     - Optionally close ticket automatically
+   - **If status="deployment_failed"**:
+     - Add failure message to work notes
+     - Update ticket status to "Deployment Failed" or "Requires Investigation"
+     - Optionally assign to deployment team for manual intervention
+5. **Return success response quickly (< 5 seconds):**
    ```json
    HTTP 200 OK
-   {"success": true, "message": "Ticket CHG0012345 marked as deployed"}
+   {"success": true, "message": "Ticket CHG0012345 deployment status updated"}
    ```
 
 **⚠️ Important Notes:**
-- Deployment callbacks only occur when **Azure DevOps pipeline successfully completes**
-- Pipeline must detect `[AZFW-AUTOMATION] Ticket: CHG0012345` marker in commit message
-- If deployment fails, **no callback is sent** (failures handled manually via pipeline logs)
+- Deployment callbacks report **simple success/failure status only**
+- No PR details, pipeline URLs, or commit information in emphasized fields
+- Focus: "Did the firewall configuration deploy to Azure successfully?"
 - Callbacks have retry logic (same as validation callbacks - 5 attempts with exponential backoff)
 
 ---
 
 ## 📊 Step 3: Configure Display Logic
 
-### Simple Approach (Recommended)
+### Structured JSON Approach (Recommended)
 
-Display `report_text` verbatim in work notes/comments. The report is pre-formatted with:
-- ✅ Section headers with borders
-- ✅ Unicode icons (✅, ⚠️, 📊, 📁)
-- ✅ Clear rule-by-rule breakdown
-- ✅ Statistics and next steps
+The validation callback provides structured data in the `report` object that you can parse and display:
 
-**No parsing required** - just display the text as-is.
+**Parse the `report` object:**
+```json
+"report": {
+  "summary": "Validated 5 rules: 3 new, 2 merged, 0 conflicts",
+  "new_rules": 3,
+  "merged_rules": 2,
+  "conflicts": 0,
+  "recommendations": [],
+  "rules": [
+    {
+      "name": "Allow-Web-Traffic",
+      "status": "new",
+      "type": "NetworkRule",
+      "protocol": "TCP",
+      "source": "10.0.0.0/24",
+      "destination": "192.168.1.0/24",
+      "ports": ["443", "80"]
+    }
+  ]
+}
+```
+
+**Display Logic:**
+1. **Summary**: Show `report.summary` in ticket header
+2. **Statistics**: Display `report.new_rules`, `report.merged_rules`, `report.conflicts`
+3. **Rule Details**: Iterate through `report.rules` array and format each rule
+4. **Status Indicators**: Use `rule.status` to show ✅ (new), ⚠️ (merged), ❌ (conflict)
+
+### Simple Message Approach (Alternative)
+
+If you prefer simpler integration, just display the `message` field directly:
+
+```python
+# In your ITSM automation script
+ticket.add_work_note(callback_payload["message"])
+```
+
+**Benefits:**
+- ✅ No parsing required
+- ✅ Human-readable text
+- ✅ Quick implementation
+- ⚠️ Less flexible for custom formatting
 
 ### Rich Display (Optional)
 
-If your ITSM supports multiple display fields:
+If your ITSM supports custom field mapping:
 
-1. **Summary Field:** Display `summary` value
+1. **Summary Field:** Display `message` value
    - Example: "Validated 5 rules: 3 new, 2 merged, 0 conflicts"
 
-2. **Work Notes:** Display `report_text` value (full report)
+2. **Work Notes:** Display formatted report from parsing `report` object
 
-3. **Custom Fields:** Map `details` object to fields:
+3. **Custom Fields:** Map fields from callback payload:
    - Total Rules → `details.total_rules`
-   - New Rules → `details.new_rules`
+   - New Rules → `details.new_rules` or `report.new_rules`
+   - Merged Rules → `details.merged` or `report.merged_rules`
+   - Conflicts → `details.conflicts` or `report.conflicts`
+   - Processing Time → `details.elapsed_time`
+   - Job ID → `job_id`
+
+4. **Status Field:** Update based on `status`:
+   - `"success"` → "Validation Complete"
+   - `"failed"` → "Validation Failed"
+   - `"processing"` → "Validation In Progress"
    - Conflicts → `details.conflicts`
    - Processing Time → `details.elapsed_time`
 
@@ -1266,17 +1475,27 @@ tail -f /path/to/parser/output/parser.log | grep callback
 
 ### Issue: Deployment Callback Not Received
 
-**Symptoms:** Pipeline succeeded but ticket not updated with deployment notification
+**Symptoms:** Firewall deployed successfully but ticket not updated with deployment status
 
 **Solutions:**
-- ✅ Verify commit message contains `[AZFW-AUTOMATION] Ticket: {ticketId}` marker
-- ✅ Check Azure DevOps pipeline has callback task configured
-- ✅ Verify `AZFW_AUTOMATION_URL` variable is set in pipeline (should point to App Gateway)
-- ✅ Check firewall allows Azure DevOps agents → App Gateway → ITSM traffic
-- ✅ Verify callback URL was stored during initial validation
-- ✅ Review Parser logs for retry attempts and errors
+- ✅ Verify Parser environment has `ITSM_DEPLOYMENT_CALLBACK_URL` configured
+  ```bash
+  # Check Parser configuration
+  echo $ITSM_DEPLOYMENT_CALLBACK_URL
+  # Should be: https://itsm.com/api/callback/deployment/{ticketId}
+  ```
+- ✅ Verify your ITSM deployment endpoint is accessible and returns HTTP 200
+  ```bash
+  curl -X POST https://itsm.com/api/callback/deployment/TEST-123 \
+    -H "Content-Type: application/json" \
+    -d '{"ticketId":"TEST-123","status":"deployed","message":"Test"}'
+  ```
+- ✅ Check Parser logs for deployment callback retry attempts and errors
+- ✅ Verify `ITSM_CALLBACK_AUTH_ENABLED` matches your endpoint's auth requirements
+- ✅ If authentication enabled, verify `ITSM_CALLBACK_API_KEY` is correct
+- ✅ Check firewall allows Parser → ITSM callback traffic on port 443
 
-**Note:** Deployment callbacks only fire for **automation-triggered** pipeline runs (with marker), not manual runs.
+**Note:** Deployment callbacks are sent when firewall configuration is actually deployed to Azure, not when PR is created.
 
 ---
 
@@ -1292,37 +1511,128 @@ curl https://parser-host/api/health
 # Expected response:
 {
   "status": "healthy",
-  "timestamp": "2026-01-16T12:44:35Z",
-  "version": "2.1.0",
+  "timestamp": "2026-02-24T09:35:00Z",
+  "version": "3.2.2",
+  "uptime_seconds": 344,
+  "active_jobs": 0,
+  
+  "cache": {
+    "disk_status": "healthy",
+    "response_cache_size": 0
+  },
+  
+  "devops": {
+    "enabled": true,
+    "last_pr_created": null
+  },
+  
+  "readiness": {
+    "phase": "ready",
+    "cache_warmed": true,
+    "auth_validated": true,
+    "seconds_since_start": 344
+  },
+  
+  "operational": {
+    "environment": "prod",
+    "hostname": "ca-azfw-policy-automation-prod--build-237332-6486cdd479-ndhtm",
+    "python_version": "3.11.14",
+    "container_version": "v3.2.2-20260224T092556Z-6a87269",
+    "git_commit": "6a87269",
+    "deployed_at": "20260224T092556Z",
+    "last_health_check": "2026-02-24T09:35:00Z"
+  },
+  
   "checks": {
     "azure_auth": {
       "ok": true,
       "message": "Azure credentials valid",
-      "details": {"method": "Managed Identity", "subscription": "..."}
+      "details": {
+        "method": "Managed Identity",
+        "subscription": "3ad8880d-c78b-4822-9...",
+        "last_check": 1771925349.82536
+      }
     },
     "cache": {
       "ok": true,
-      "message": "Cache operational (40 items)",
-      "details": {"items": 40, "size_mb": 2.03, "hits": 0, "misses": 0}
+      "message": "Cache operational (41 items)",
+      "details": {
+        "items": 41,
+        "size_mb": 2.05,
+        "hits": 0,
+        "misses": 0
+      }
     },
     "worker_pool": {
       "ok": true,
       "message": "Thread pool operational",
-      "details": {"max_workers": 4, "queue_depth": 0}
+      "details": {
+        "max_workers": 4,
+        "queue_depth": 0
+      }
     },
     "itsm": {
       "ok": true,
-      "message": "ITSM configured",
-      "details": {"enabled": true}
+      "message": "ITSM not configured (optional)",
+      "details": {
+        "enabled": false
+      }
     }
   },
+  
   "metrics": {
-    "uptime_seconds": 3600,
+    "uptime_seconds": 344,
     "active_jobs": 0,
-    "total_jobs_tracked": 5
+    "completed_jobs": 0,
+    "failed_jobs": 0,
+    "success_rate_percent": 100,
+    "total_jobs_tracked": 0
+  },
+  
+  "performance": {
+    "average_job_duration_seconds": 0,
+    "last_job_timestamp": null,
+    "current_active_jobs": 0,
+    "cache_hit_rate_percent": 0
+  },
+  
+  "resources": {
+    "memory_usage_mb": 131.14,
+    "memory_percent": 3.55,
+    "output_directory_size_mb": 11.49,
+    "thread_pool_utilization_percent": 0,
+    "thread_pool_max_workers": 4
   }
 }
 ```
+
+**Key Health Sections:**
+
+| Section | Purpose | Key Fields |
+|---------|---------|------------|
+| **`status`** | Overall health | `"healthy"` = operational |
+| **`readiness`** | Service readiness | `phase: "ready"`, `cache_warmed`, `auth_validated` |
+| **`operational`** | Deployment info | `container_version`, `git_commit`, `deployed_at`, `hostname` |
+| **`checks`** | Subsystem health | Each check has `ok`, `message`, `details` |
+| **`metrics`** | Job statistics | `active_jobs`, `success_rate_percent`, `completed_jobs` |
+| **`performance`** | Performance metrics | `cache_hit_rate_percent`, `average_job_duration_seconds` |
+| **`resources`** | System resources | `memory_usage_mb`, `memory_percent`, `output_directory_size_mb` |
+
+**Interpreting Health Status:**
+
+✅ **Service Ready:**
+- `status: "healthy"` AND `readiness.phase: "ready"` AND `readiness.cache_warmed: true`
+- All `checks.*.ok: true`
+
+⚠️ **Service Starting:**
+- `status: "healthy"` BUT `readiness.phase: "warming"`
+- Cache still loading (may take 1-2 minutes)
+- Wait before sending validation requests
+
+❌ **Service Unhealthy:**
+- `status: "unhealthy"` OR any `checks.*.ok: false`
+- Check specific failed check's `message` for details
+- Contact Parser administrator
 
 ### Log Locations
 
@@ -1377,10 +1687,23 @@ Investigation: https://itsm.company.com/api/callback/investigate/CHG0012345
 Deployment:    https://itsm.company.com/api/callback/deployment/CHG0012345
 ```
 
+**URL Configuration Methods:**
+
+1. **Environment Configuration (Recommended)**:
+   - Configure URLs in Parser environment variables with `{ticketId}` placeholder
+   - `ITSM_VALIDATION_CALLBACK_URL=https://itsm.com/api/callback/validate/{ticketId}`
+   - `ITSM_DEPLOYMENT_CALLBACK_URL=https://itsm.com/api/callback/deployment/{ticketId}`
+   - Parser automatically replaces `{ticketId}` with actual ticket ID for each request
+
+2. **Legacy Request-Based (Still Supported)**:
+   - Include `callbackUrl` in webhook request body
+   - Overrides environment config for validation callback only
+   - Deployment callback always uses environment-configured URL
+
 **URL Patterns:**
-- Use different paths (`/validate`, `/investigate`, `/deployment`) or same path with different logic based on payload
-- Parser will POST to the URL you provide in `callbackUrl` field
-- Deployment callbacks use the stored `callbackUrl` from original validation request
+- Use different paths (`/validate`, `/deployment`) for different callback types
+- Parser POSTs to appropriate endpoint based on callback type
+- Both validation and deployment callbacks support `{ticketId}` placeholder
 
 ### Sample Request (Copy/Paste Ready)
 
@@ -1409,8 +1732,8 @@ curl -X POST https://parser-host/api/webhook \
 
 ---
 
-**Version:** 1.4.1  
-**Last Updated:** January 16, 2026   
+**Version:** 1.6.0  
+**Last Updated:** February 24, 2026  
 **Related Docs:**
 - Full Integration Guide: `ITSM_INTEGRATION_GUIDE_v3.md`
 - Azure DevOps Pipeline Integration: `integration/AZURE_DEVOPS_PIPELINE_INTEGRATION.md`
