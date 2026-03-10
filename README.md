@@ -1,7 +1,7 @@
 # ITSM Integration - Quick Start Guide
 
-**Version:** 1.6.0  
-**Last Updated:** February 24, 2026  
+**Version:** 1.7.0  
+**Last Updated:** March 10, 2026  
 **Audience:** ITSM Administrators  
 **Purpose:** Compact guide to integrate your ITSM with Azure Firewall Policy Automation
 
@@ -212,13 +212,14 @@ involves Azure DevOps Pipeline → Parser → ITSM callback, which happens hours
         │
         ▼
 6. Parser → ITSM (with retry - see diagram below)
-   POST https://itsm/api/callback
+   POST https://itsm/api/callback/validate/CHG0012345
    {
-     "ticket_id": "CHG0012345",
+     "ticketId": "CHG0012345",
+     "job_id": "20251108-143000_CHG0012345_a3f9",
      "status": "success",
-     "summary": "Validated 5 rules: 3 new, 2 merged",
-     "report_text": "📊 Full formatted report...",
-     "details": {...}
+     "message": "All rules processed successfully. Validated: 5, Merged: 2.",
+     "details": {"total_rules": 5, "validated": 5, "merged": 2, ...},
+     "report": {"metadata": {...}, "summary": {...}, "deployment": {...}, "txt_report": "..."}
    }
         │
         ▼
@@ -305,7 +306,8 @@ Parser → ITSM: POST /callback
                 └─→ 🔄 Retry 5 after 80s  (Total: 155s elapsed)
                         └─→ ✅ Success? Done
                         └─→ ❌ All retries exhausted:
-                                • Save callback_failed.txt
+                                • Save callback_result.json
+                                • Save callback_metadata.json
                                 • Log failure in parser.log
                                 • Results available for manual recovery
 ```
@@ -525,12 +527,19 @@ Each rule in the `rules` array supports these key fields:
 | `name` | string | ✅ Yes | Unique rule name |
 | `ruleType` | string | ✅ Yes | `NetworkRule` or `ApplicationRule` |
 | `action` | string | ✅ Yes | `Allow` or `Deny` - Determines rule routing |
-| `ipProtocols` | array | NetworkRule only | `["TCP"]`, `["UDP"]`, `["ICMP"]`, `["Any"]` |
+| `ipProtocols` | array | NetworkRule only | `["TCP"]`, `["UDP"]`, `["ICMP"]`, `["Any"]` — see ICMP note below |
 | `sourceAddresses` | array | ✅ Yes | IP/CIDR notation or `["*"]` |
 | `destinationAddresses` | array | NetworkRule only | IP/CIDR or Azure Service Tags |
 | `destinationPorts` | array | NetworkRule only | Port numbers or ranges |
 | `protocols` | array | ApplicationRule only | Protocol objects with type and port |
 | `targetFqdns` | array | ApplicationRule only | FQDNs or FQDN wildcards |
+
+**⚠️ ICMP + TCP/UDP Auto-Split:**  
+Azure Firewall ignores port restrictions on ICMP rules. If you submit a NetworkRule with both ICMP and TCP/UDP in `ipProtocols` (e.g., `["TCP", "ICMP"]`), the Parser automatically splits it into **two separate rules**:
+- Rule 1: TCP/UDP only — with the original destination ports
+- Rule 2: ICMP only — with destination ports removed (Azure ignores them for ICMP)
+
+Both rules are submitted together and both appear in the validation report. No extra configuration is needed — the split is fully automatic.
 
 **🔑 Action Field (Rule Routing):**
 
@@ -635,8 +644,8 @@ X-API-Key: <optional-authentication-key>
   "ticketId": "CHG0012345",
   "job_id": "20251108-143000_CHG0012345_a3f9",
   "status": "success",
-  "message": "Validated 5 rules: 3 new, 2 merged, 0 conflicts",
-  
+  "message": "All rules processed successfully. Validated: 5, Merged: 2.",
+
   "details": {
     "rules_count": 5,
     "total_rules": 5,
@@ -646,30 +655,57 @@ X-API-Key: <optional-authentication-key>
     "new_rules": 3,
     "elapsed_time": "2.34s"
   },
-  
+
   "report": {
-    "summary": "Validated 5 rules: 3 new, 2 merged, 0 conflicts",
-    "new_rules": 3,
-    "merged_rules": 2,
-    "conflicts": 0,
-    "recommendations": [],
-    "rules": [
-      {
-        "name": "Allow-Web-Traffic",
-        "status": "new",
-        "type": "NetworkRule",
-        "protocol": "TCP",
-        "source": "10.0.0.0/24",
-        "destination": "192.168.1.0/24",
-        "ports": ["443", "80"]
-      },
-      {
-        "name": "Allow-Database-Access",
-        "status": "merged",
-        "matched_rule": "Prod-DB-Access",
-        "recommendation": "Review existing rule or modify name"
-      }
-    ]
+    "metadata": {
+      "job_id": "20251108-143000_CHG0012345_a3f9",
+      "execution_start": "2026-03-10T13:18:26Z",
+      "execution_end": "2026-03-10T13:18:50Z",
+      "execution_time_seconds": 24.3,
+      "status": "success",
+      "itsm_ticket_id": "CHG0012345"
+    },
+    "summary": {
+      "total_rules": 5,
+      "application_rules": 0,
+      "network_rules": 5,
+      "rules_covered": 5,
+      "coverage_percentage": 100.0,
+      "rules_blocked_by_deny": 0,
+      "blocked_percentage": 0.0,
+      "rules_merged": 2,
+      "merged_percentage": 40.0,
+      "new_rules_generated": 3,
+      "generation_percentage": 60.0,
+      "total_deployment_rules": 5,
+      "processing_errors": 0,
+      "audit_notes": 0
+    },
+    "deployment": {
+      "rules_to_update": [
+        {
+          "incoming_rule_name": "Allow-Database-Access",
+          "existing_rule_reference": "Prod-DB-Access",
+          "complete_merged_config": { "...": "merged rule configuration" },
+          "change_summary": { "...": "description of changes" },
+          "merge_quality": "High confidence"
+        }
+      ],
+      "rules_to_create": [
+        {
+          "rule": { "name": "Allow-Web-Traffic", "...": "full rule config" }
+        }
+      ]
+    },
+    "analysis": {
+      "covered_rules": ["..."],
+      "blocked_rules": [],
+      "merged_rules": ["..."],
+      "generated_rules": ["..."],
+      "errors": [],
+      "audit_notes": []
+    },
+    "txt_report": "╔══════════ AZURE FIREWALL RULE VALIDATION REPORT ══════════╗\n║  ...full ASCII validation report text...                  ║\n╚═══════════════════════════════════════════════════════════╝"
   }
 }
 ```
@@ -725,9 +761,12 @@ X-API-Key: <optional-authentication-key>
 | `ticketId` | string | Your ticket identifier | Use to lookup ticket |
 | `job_id` | string | Parser job identifier | Optional: store for tracking |
 | `status` | string | `processing`, `success`, or `failed` | Update ticket state |
-| **`message`** | string | **Human-readable summary** | Display in ticket header/status |
+| **`message`** | string | **Short human-readable summary** (`"All rules processed successfully. Validated: X, Merged: Y."`) | Display in ticket header/status |
 | `details` | object | Structured metrics (rules_count, conflicts, merged, etc.) | Optional: map to custom fields |
-| **`report`** | object | **Detailed validation results** | Parse for rule-by-rule breakdown |
+| **`report`** | object | **Full validation report JSON** (`metadata`, `summary`, `deployment`, `analysis`, `txt_report`) | Parse for detailed rule-by-rule breakdown |
+| `report.summary` | object | Numeric counters: `total_rules`, `rules_covered`, `rules_merged`, `new_rules_generated`, etc. | Display statistics in ticket |
+| `report.deployment` | object | Rules ready for Azure: `rules_to_create` and `rules_to_update` arrays | Use for deployment automation |
+| `report.txt_report` | string | Full ASCII-formatted validation report text | Display as pre-formatted text block in work notes |
 | `error` | object | Error details (only present when status="failed") | Display error information to user |
 
 ### HTTP Status Code Reference
@@ -821,9 +860,10 @@ Parser does NOT retry when:
 
 If all 5 retry attempts fail:
 1. Parser logs the failure to `output/parser.log`
-2. Job status saved to `output/jobs/<job_id>/callback_failed.txt`
-3. Validation results remain in job folder for manual retrieval
-4. **No email notification sent** (future enhancement)
+2. Job status saved to `output/jobs/<job_id>/callback_result.json` (full delivery diagnostic)
+3. Callback configuration saved to `output/jobs/<job_id>/callback_metadata.json`
+4. Validation results remain in job folder for manual retrieval
+5. **No email notification sent** (future enhancement)
 
 **Recommendations:**
 
@@ -836,16 +876,28 @@ If all 5 retry attempts fail:
 
 ```bash
 # Find jobs with failed callbacks
-find output/jobs -name "callback_failed.txt"
+find output/jobs -name "callback_result.json" | \
+  xargs grep -l '"delivery_status": "failed"'
 
 # View specific failure details
-cat output/jobs/20251108-143000_CHG0012345_a3f9/callback_failed.txt
+cat output/jobs/20251108-143000_CHG0012345_a3f9/callback_result.json
 
 # Expected output:
-# Callback failed after 5 attempts
-# Last error: Connection timeout to https://itsm/api/callback
-# Last attempt: 2025-11-08 14:32:35
-# Validation results available in: validation_report_CHG0012345.json
+# {
+#   "delivery_status": "failed",
+#   "callback_url": "https://itsm.company.com/api/callback/validate/CHG0012345",
+#   "environment_hint": "prod",
+#   "response_code": 400,
+#   "response_body_snippet": "{\"success\":false,\"message\":\"...\"}",
+#   "sent_payload_snippet": "{\"ticketId\":\"CHG0012345\",\"status\":\"success\",...}",
+#   "retry_count": 1,
+#   "last_error": "HTTP 400 client error — no retry",
+#   "attempt_log": [...],
+#   "sent_at": "2026-03-10T13:18:52Z"
+# }
+
+# Check callback configuration used
+cat output/jobs/20251108-143000_CHG0012345_a3f9/callback_metadata.json
 ```
 
 ---
@@ -951,30 +1003,39 @@ The validation callback provides structured data in the `report` object that you
 **Parse the `report` object:**
 ```json
 "report": {
-  "summary": "Validated 5 rules: 3 new, 2 merged, 0 conflicts",
-  "new_rules": 3,
-  "merged_rules": 2,
-  "conflicts": 0,
-  "recommendations": [],
-  "rules": [
-    {
-      "name": "Allow-Web-Traffic",
-      "status": "new",
-      "type": "NetworkRule",
-      "protocol": "TCP",
-      "source": "10.0.0.0/24",
-      "destination": "192.168.1.0/24",
-      "ports": ["443", "80"]
-    }
-  ]
+  "summary": {
+    "total_rules": 5,
+    "rules_covered": 5,
+    "rules_merged": 2,
+    "new_rules_generated": 3,
+    "rules_blocked_by_deny": 0,
+    "coverage_percentage": 100.0,
+    "processing_errors": 0
+  },
+  "deployment": {
+    "rules_to_update": [
+      {
+        "incoming_rule_name": "Allow-Database-Access",
+        "existing_rule_reference": "Prod-DB-Access",
+        "merge_quality": "High confidence",
+        "change_summary": { "...": "what changed" }
+      }
+    ],
+    "rules_to_create": [
+      {
+        "rule": { "name": "Allow-Web-Traffic", "...": "full rule config" }
+      }
+    ]
+  },
+  "txt_report": "╔══ AZURE FIREWALL RULE VALIDATION REPORT ══╗\n║  ...full ASCII report text...             ║\n╚═══════════════════════════════════════════╝"
 }
 ```
 
 **Display Logic:**
-1. **Summary**: Show `report.summary` in ticket header
-2. **Statistics**: Display `report.new_rules`, `report.merged_rules`, `report.conflicts`
-3. **Rule Details**: Iterate through `report.rules` array and format each rule
-4. **Status Indicators**: Use `rule.status` to show ✅ (new), ⚠️ (merged), ❌ (conflict)
+1. **Summary Statistics**: Read from `report.summary` — use `report.summary.rules_covered`, `report.summary.rules_merged`, `report.summary.new_rules_generated`, `report.summary.rules_blocked_by_deny`
+2. **Rules to Merge**: Iterate through `report.deployment.rules_to_update` — each entry has `incoming_rule_name`, `existing_rule_reference`, and `merge_quality`
+3. **New Rules**: Iterate through `report.deployment.rules_to_create` — each entry has a `rule` object with the full configuration
+4. **Formatted Report**: Display `report.txt_report` as a pre-formatted text block — contains the full human-readable ASCII validation report
 
 ### Simple Message Approach (Alternative)
 
@@ -996,15 +1057,15 @@ ticket.add_work_note(callback_payload["message"])
 If your ITSM supports custom field mapping:
 
 1. **Summary Field:** Display `message` value
-   - Example: "Validated 5 rules: 3 new, 2 merged, 0 conflicts"
+   - Example: "All rules processed successfully. Validated: 5, Merged: 2."
 
 2. **Work Notes:** Display formatted report from parsing `report` object
 
 3. **Custom Fields:** Map fields from callback payload:
-   - Total Rules → `details.total_rules`
-   - New Rules → `details.new_rules` or `report.new_rules`
-   - Merged Rules → `details.merged` or `report.merged_rules`
-   - Conflicts → `details.conflicts` or `report.conflicts`
+   - Total Rules → `details.total_rules` or `report.summary.total_rules`
+   - New Rules → `details.new_rules` or `report.summary.new_rules_generated`
+   - Merged Rules → `details.merged` or `report.summary.rules_merged`
+   - Covered Rules → `report.summary.rules_covered`
    - Processing Time → `details.elapsed_time`
    - Job ID → `job_id`
 
@@ -1012,8 +1073,6 @@ If your ITSM supports custom field mapping:
    - `"success"` → "Validation Complete"
    - `"failed"` → "Validation Failed"
    - `"processing"` → "Validation In Progress"
-   - Conflicts → `details.conflicts`
-   - Processing Time → `details.elapsed_time`
 
 ---
 
@@ -1228,11 +1287,34 @@ If callbacks fail, poll for job status:
 GET /status/{ticket_id}
 ```
 
-**Response:**
+**Response (completed job):**
 ```json
 {
   "ticket_id": "CHG0012345",
-  "job_id": "20251108_143000_CHG0012345",
+  "job_id": "20251108-143000_CHG0012345_a3f9",
+  "status": "completed",
+  "callback": {
+    "url": "https://itsm.company.com/api/callback/validate/CHG0012345",
+    "status": "failed",
+    "sent_at": "2026-03-10T13:18:52Z",
+    "response_code": 400,
+    "retry_count": 1,
+    "last_error": "HTTP 400 client error — no retry",
+    "response_body_snippet": "{\"success\":false,\"message\":\"Invalid field\"}",
+    "sent_payload_snippet": "{\"ticketId\":\"CHG0012345\",\"status\":\"success\",\"message\":\"All rules processed...\"}",
+    "environment_hint": "qa",
+    "attempt_log": [
+      {"attempt": 1, "timestamp": "2026-03-10T13:18:52Z", "outcome": "http_400"}
+    ]
+  }
+}
+```
+
+**Response (failed job):**
+```json
+{
+  "ticket_id": "CHG0012345",
+  "job_id": "20251108-143000_CHG0012345_a3f9",
   "status": "failed",
   "error": {
     "category": "azure_timeout",
@@ -1240,6 +1322,18 @@ GET /status/{ticket_id}
     "retryable": true,
     "owner": "azure_admin",
     "retry_after": 300
+  },
+  "callback": {
+    "url": "https://itsm.company.com/api/callback/validate/CHG0012345",
+    "status": "failed",
+    "sent_at": "2026-03-10T13:18:52Z",
+    "response_code": null,
+    "retry_count": 5,
+    "last_error": "Connection timeout",
+    "response_body_snippet": null,
+    "sent_payload_snippet": "{\"ticketId\":\"CHG0012345\",\"status\":\"failed\",...}",
+    "environment_hint": "qa",
+    "attempt_log": [...]
   }
 }
 ```
@@ -1416,7 +1510,23 @@ curl -X POST https://itsm/api/callback/test \
 # 2. Check Parser logs for callback attempts
 tail -f /path/to/parser/output/parser.log | grep callback
 
-# 3. Verify firewall allows Parser → ITSM traffic
+# 3. Check callback_result.json for exact delivery status and response
+cat output/jobs/<job_id>/callback_result.json
+# Contains: delivery_status, response_code, response_body_snippet,
+#           sent_payload_snippet, retry_count, last_error, attempt_log
+
+# 4. Check callback_metadata.json for configuration at time of job
+cat output/jobs/<job_id>/callback_metadata.json
+# Contains: callback_url, environment_hint, config info
+
+# 5. Verify firewall allows Parser → ITSM traffic
+```
+
+**Status API (alternative to reading files directly):**
+```bash
+GET /status/<ticket_id>
+# Response includes a full "callback" section with all delivery details,
+# including sent_payload_snippet (first 1000 chars of the last payload sent)
 ```
 
 **Solutions:**
@@ -1424,6 +1534,7 @@ tail -f /path/to/parser/output/parser.log | grep callback
 - ✅ Check firewall rules allow App Gateway → ITSM:443
 - ✅ Ensure ITSM endpoint accepts POST with JSON body
 - ✅ Check API key authentication if enabled
+- ✅ Check `response_body_snippet` in `callback_result.json` — if ITSM returns HTTP 400, it means the payload was rejected (check `sent_payload_snippet` to inspect what was sent)
 
 ### Issue: Rules Not Parsing
 
@@ -1855,8 +1966,8 @@ curl -X POST https://parser-host/api/webhook \
 
 ---
 
-**Version:** 1.6.0  
-**Last Updated:** February 24, 2026  
+**Version:** 1.7.0  
+**Last Updated:** March 10, 2026  
 **Related Docs:**
 - Full Integration Guide: `ITSM_INTEGRATION_GUIDE_v3.md`
 - Azure DevOps Pipeline Integration: `integration/AZURE_DEVOPS_PIPELINE_INTEGRATION.md`
